@@ -34,6 +34,8 @@ For simple engines, the plugin runs the helper once per sentence:
 
 The helper must exit with status `0` and produce a non-empty WAV file.
 
+Write a plain PCM WAV with the canonical 44-byte header (`RIFF`, `fmt `, then `data` immediately after). The plugin patches WAV sizes at fixed header offsets when it pads or merges sentences, so an extra chunk such as ffmpeg's default `LIST/INFO` metadata gets corrupted and playback fails with "clip open failed". With ffmpeg, add `-map_metadata -1 -fflags +bitexact -flags:a +bitexact` to the output options.
+
 ### Daemon/FIFO mode
 
 For engines with a large voice database that is expensive to load per sentence, the helper can run as a persistent daemon:

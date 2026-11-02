@@ -2093,6 +2093,17 @@ function TTSEngine:prefetch(text, use_espeak, idx)
         self._piper:enqueue(text)
         return true  -- launched (or already in queue)
     end
+    -- Platform-native helper: both the one-shot and daemon modes answer
+    -- asynchronously (like Android), so the synchronous slot fill below
+    -- races: the concat loop and _prefetchNextSentence both launch the
+    -- same sentence while the slot is still empty, _cleanPrefetch deletes
+    -- the first launch's file, and the completion poll overwrites
+    -- current_audio_file of the playing sentence -> "clip open failed"
+    -- (issue #110).  Synthesize on demand until the native backend gets
+    -- its own async lookahead modelled on prefetchAndroid.
+    if self.backend == self.BACKENDS.NATIVE then
+        return false
+    end
     -- Don't prefetch the same text twice
     if self._prefetch_text == text and self._prefetch_file then
         return true
