@@ -677,6 +677,7 @@ function AudiobookPlayer:setupUI()
                 UIManager:setDirty(self, function()
                     return "ui", self._minimized and self.dimen or nil
                 end)
+                self:_showSyncOverlay(v)
             end
         end
         self._mini_sync_minus = miniButton("−", 22, function() nudge(-100) end)
@@ -1806,6 +1807,7 @@ function AudiobookPlayer:hide()
     -- Stop the TTS context cycler so it does not keep a timer alive (and
     -- touch a widget that is being torn down).
     self._tts_info_active = false
+    self:_closeSyncOverlay()
     UIManager:close(self)
     UIManager:setDirty("all", "full")
 end
@@ -2271,6 +2273,65 @@ function AudiobookPlayer:onCloseWidget()
     if self._speed_dialog then
         UIManager:close(self._speed_dialog)
         self._speed_dialog = nil
+    end
+    self:_closeSyncOverlay()
+end
+
+--- Read-along sync nudges: show the new offset in a box just above the mini
+--- bar for a couple of seconds.  The time line under the title only holds it
+--- until the next clock tick, too brief to read on e-ink.  The box is a toast,
+--- so taps (including further nudges) pass straight through it.
+local SYNC_OVERLAY_SECONDS = 2.5
+
+function AudiobookPlayer:_showSyncOverlay(offset_ms)
+    local text = string.format(_("Sync %+.1f s"), offset_ms / 1000)
+    if self._sync_overlay then
+        self._sync_overlay_text:setText(text)
+        UIManager:setDirty(self._sync_overlay, function()
+            return "ui", self._sync_overlay_rect
+        end)
+    else
+        local face = Font:getFace("cfont", 22)
+        self._sync_overlay_text = TextWidget:new{ text = text, face = face }
+        -- Fixed width from the widest label so updates repaint in place.
+        local w = TextWidget:new{ text = _("Sync +00.0 s"), face = face }:getSize().w
+        local frame = FrameContainer:new{
+            toast = true,
+            _plugin_chrome = true,
+            background = Blitbuffer.COLOR_WHITE,
+            bordersize = Size.border.thick,
+            radius = Screen:scaleBySize(10),
+            padding = Size.padding.large,
+            padding_left = Size.padding.large * 2,
+            padding_right = Size.padding.large * 2,
+            CenterContainer:new{
+                dimen = Geom:new{ w = w, h = self._sync_overlay_text:getSize().h },
+                self._sync_overlay_text,
+            },
+        }
+        local size = frame:getSize()
+        local x = math.floor((self.width - size.w) / 2)
+        local y = math.max(0, self:_miniBarY() - size.h - Screen:scaleBySize(12))
+        self._sync_overlay = frame
+        self._sync_overlay_rect = Geom:new{ x = x, y = y, w = size.w, h = size.h }
+        UIManager:show(frame, "ui", self._sync_overlay_rect, x, y)
+    end
+    if self._sync_overlay_timer then
+        UIManager:unschedule(self._sync_overlay_timer)
+    end
+    self._sync_overlay_timer = function() self:_closeSyncOverlay() end
+    UIManager:scheduleIn(SYNC_OVERLAY_SECONDS, self._sync_overlay_timer)
+end
+
+function AudiobookPlayer:_closeSyncOverlay()
+    if self._sync_overlay_timer then
+        UIManager:unschedule(self._sync_overlay_timer)
+        self._sync_overlay_timer = nil
+    end
+    if self._sync_overlay then
+        UIManager:close(self._sync_overlay, "ui", self._sync_overlay_rect)
+        self._sync_overlay = nil
+        self._sync_overlay_text = nil
     end
 end
 
