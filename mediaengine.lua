@@ -1238,12 +1238,116 @@ function MediaEngine:load(path)
     return true
 end
 
+-- Kobo MTK: the Bluetooth daemon can be left in a nonstop discovery loop
+-- (10 s on / 4 s off) that starves the A2DP stream: AirPods drop audio
+-- after ~10 s. Stop any discovery before playback. Fire-and-forget so it
+-- can never block the UI.
+function MediaEngine:_stopMtkDiscovery()
+    if not self._use_persistent_pipeline then return end
+    os.execute("dbus-send --system --print-reply --reply-timeout=3000 "
+        .. "--dest=com.kobo.mtk.bluedroid /org/bluez/hci0 "
+        .. "org.bluez.Adapter1.StopDiscovery >/dev/null 2>&1 &")
+    logger.warn("MediaEngine: requested MTK StopDiscovery before playback")
+end
+
+-- Restart playback at pos, keeping the caller's callbacks.
+function MediaEngine:_restartAt(pos, reason)
+    local saved_on_complete = self._on_complete
+    local saved_on_fail = self._on_fail
+    logger.warn("MediaEngine: restart at", pos, "reason=", reason)
+    self._seek_offset = pos
+    self:stop()
+    local restart_gen = self.play_generation
+    UIManager:scheduleIn(1.0, function()
+        if self.play_generation ~= restart_gen then return end
+        self:play(saved_on_complete, saved_on_fail)
+    end)
+end
+
+-- MTK: playback started before the headset connected goes to a dead route
+-- and never re-attaches. Poll for a connected audio device for up to two
+-- minutes, then restart from where play was pressed (nothing was heard).
+function MediaEngine:_startBtReattachWatcher(gen, from_pos)
+    local bt = self.plugin and self.plugin.bt_manager
+    if not bt then return end
+    local tries, seen = 0, false
+    local function check()
+        if self.play_generation ~= gen or not self.is_playing then return end
+        if seen then
+            self:_restartAt(from_pos, "bt device connected")
+            return
+        end
+        tries = tries + 1
+        if tries > 40 then
+            logger.warn("MediaEngine: reattach watcher gave up")
+            return
+        end
+        pcall(bt.clearAudioDeviceCache, bt)
+        local ok, up = pcall(bt.anyAudioDeviceConnected, bt)
+        -- Give A2DP a few seconds to come up after the link connects.
+        if ok and up then seen = true end
+        UIManager:scheduleIn(3, check)
+    end
+    UIManager:scheduleIn(3, check)
+end
+
+-- MTK: the A2DP stream sometimes never starts (daemon clock stuck at
+-- ~0.2 s, no "PSM setting: 0" in dmesg): silence and a frozen highlight.
+-- Restart from the start point up to twice, then tell the user.
+function MediaEngine:_startAudiooutStallWatchdog(gen)
+    local start_pos = self._seek_offset or 0
+    local last_pos, still, good = nil, 0, 0
+    local function check()
+        if self.play_generation ~= gen or not self.is_playing
+                or not self._audioout_external then return end
+        if self.is_paused then
+            UIManager:scheduleIn(2, check)
+            return
+        end
+        local ok, st = pcall(function()
+            return self._audioout_client:status(300)
+        end)
+        local pos = ok and st and st.pos_ms and st.pos_ms / 1000 or nil
+        if pos and last_pos and pos - last_pos > 0.5 then
+            still = 0
+            good = good + 1
+            if good >= 5 then
+                self._stall_retries = 0
+                return
+            end
+        else
+            still = still + 1
+            good = 0
+        end
+        last_pos = pos or last_pos
+        if still >= 4 then
+            self._stall_retries = (self._stall_retries or 0) + 1
+            if self._stall_retries <= 2 then
+                logger.warn("MediaEngine: audioout stalled at", pos,
+                    "retry", self._stall_retries)
+                self:_restartAt(start_pos, "audio stalled")
+            else
+                self._stall_retries = 0
+                logger.warn("MediaEngine: audioout still stalled; giving up")
+                local InfoMessage = require("ui/widget/infomessage")
+                UIManager:show(InfoMessage:new{
+                    text = _("Bluetooth audio isn't starting.\nTurn Bluetooth off and on, then press play again."),
+                })
+            end
+            return
+        end
+        UIManager:scheduleIn(2, check)
+    end
+    UIManager:scheduleIn(4, check)
+end
+
 function MediaEngine:play(on_complete, on_fail)
     if not self.current_path then
         logger.err("MediaEngine: play() called without load()")
         if on_fail then on_fail("no file loaded") end
         return false
     end
+    pcall(self._stopMtkDiscovery, self)
 
     -- Kindle A2DP (AirPods): any stop→play gap (seek, track advance, resume)
     -- lets audiomgrd suspend the datapath.  Park silence first so orphan-kill
@@ -1282,8 +1386,18 @@ function MediaEngine:play(on_complete, on_fail)
             self._total_pause_ms = 0
             return true
         end
-        logger.warn("MediaEngine: persistent pipeline play failed, falling back to standard backend")
-        self._use_persistent_pipeline = false
+        local bt = self.plugin and self.plugin.bt_manager
+        if bt and bt.anyAudioDeviceConnected and not bt:anyAudioDeviceConnected() then
+            -- No headset yet (Bluetooth still coming up). Keep the persistent
+            -- path and restart once a device connects, instead of playing on
+            -- into a dead route for the rest of the session.
+            logger.warn("MediaEngine: no BT audio device at play; fallback + reattach watcher")
+            self._reattach_from = self._seek_offset or 0
+        else
+            logger.warn("MediaEngine: persistent pipeline play failed, falling back to standard backend")
+            self._use_persistent_pipeline = false
+            self._reattach_from = nil
+        end
     end
 
     local ok = false
@@ -1317,6 +1431,10 @@ function MediaEngine:play(on_complete, on_fail)
         self._play_start_time = UIManager:getTime()
         self._pause_start_time = nil
         self._total_pause_ms = 0
+        if self._reattach_from then
+            self:_startBtReattachWatcher(self.play_generation, self._reattach_from)
+            self._reattach_from = nil
+        end
     else
         self.is_playing = false
         self.is_paused = false
@@ -1773,7 +1891,7 @@ function MediaEngine:_playFfmpegPipe(gen)
 
     -- exec=false: `exec a | b` would replace the shell with the last pipeline
     -- stage (gst-launch), losing the PID we capture.
-    return self:_spawnTracked(cmd, gen, { name = "ffmpeg", exec = false })
+    return self:_spawnTracked(cmd, gen, { name = "ffmpeg", exec = false, setsid = true })
 end
 
 function MediaEngine:_playGstPlay(gen)
@@ -2299,10 +2417,25 @@ function MediaEngine:_playAudiooutExternal(gen)
     -- decodes the file itself -- no ffmpeg feeder process at all. Speed
     -- changes fall back to the feeder, whose filter chain carries atempo.
     local use_dec = ao:hasDecoder() and (self._playback_speed or 1.0) == 1.0
-    local resp = ao:externalStart(44100, 2, nil,
-        (self._seek_offset or 0) * 1000,
-        (self.current_duration or 0) * 1000,
-        use_dec and self.current_path or nil)
+    local function ext_start()
+        return ao:externalStart(44100, 2, nil,
+            (self._seek_offset or 0) * 1000,
+            (self.current_duration or 0) * 1000,
+            use_dec and self.current_path or nil)
+    end
+    local resp = ext_start()
+    if not resp then
+        -- A wedged daemon (e.g. left paused by a previous KOReader run) still
+        -- answers ping but holds the single-instance mtk sink: falling back
+        -- now makes every clip fail instantly and races through the book.
+        logger.warn("MediaEngine: audioout not answering; respawning daemon")
+        ao:killDaemon()
+        os.execute("usleep 300000")
+        if ao:start() then
+            use_dec = ao:hasDecoder() and (self._playback_speed or 1.0) == 1.0
+            resp = ext_start()
+        end
+    end
     if not resp or not resp.ok then
         logger.warn("MediaEngine: audioout external start refused:",
             resp and resp.error or "timeout")
@@ -2310,7 +2443,7 @@ function MediaEngine:_playAudiooutExternal(gen)
     end
     self._audioout_ext_dec = use_dec or nil
     self._audioout_external = true
-    self._killAudiooutFeeder()
+    self:_killAudiooutFeeder()
 
     -- Session recording tee, same as the wrapper path.
     local wav_out = ""
@@ -2334,6 +2467,7 @@ function MediaEngine:_playAudiooutExternal(gen)
     if self.current_duration and self.current_duration > 0 then
         self:_startPersistentCompletionWatcher(gen, self.current_duration)
     end
+    self:_startAudiooutStallWatchdog(gen)
     return true
 end
 
@@ -2889,10 +3023,26 @@ function MediaEngine:pause()
     self._pause_start_time = UIManager:getTime()
 
     if self._audioout_external and self._audioout_client then
+        -- Remember where we paused: the daemon's status while paused reports
+        -- the stream's start epoch, so resume restarted the section from
+        -- where play was first pressed.
+        self._paused_position = math.max(0, live_pos)
+        self._seek_offset = self._paused_position
         -- Kill the ffmpeg feeder; the daemon feeds keepalive silence so
         -- the A2DP link stays up, exactly like the wrapper path.
         self:_killAudiooutFeeder()
         self._audioout_client:pause()
+        if self._use_persistent_pipeline then
+            -- MTK sink: a paused daemon cannot restart its stream (the resume
+            -- rebuild never reaches PLAYING, so resume is silent). Release the
+            -- daemon and the sink; resume() starts a fresh daemon here.
+            self._audioout_client:killDaemon()
+            self._audioout_external = false
+            self._audioout_ext_dec = nil
+            self._audioout_released_on_pause = true
+            logger.warn("MediaEngine: paused audioout: daemon released at", self._paused_position)
+            return
+        end
         logger.warn("MediaEngine: paused audioout external stream")
         return
     end
@@ -2967,13 +3117,32 @@ end
 function MediaEngine:resume()
     if not self.is_playing or not self.is_paused then return end
 
+    if self._audioout_released_on_pause then
+        self._audioout_released_on_pause = nil
+        local pos = self._paused_position or 0
+        self:_killAudiooutFeeder()
+        if self._pause_start_time then
+            self._total_pause_ms = self._total_pause_ms + time.to_ms(UIManager:getTime() - self._pause_start_time)
+            self._pause_start_time = nil
+        end
+        self.is_paused = false
+        self._paused_position = nil
+        self._seek_offset = pos
+        logger.warn("MediaEngine: resume via fresh daemon at", pos)
+        return self:play(self._on_complete, self._on_fail)
+    end
+
     if self._audioout_external and self._audioout_client then
-        local resume_pos = self:getPosition()
+        local resume_pos = self._paused_position or self:getPosition()
+        self:_killAudiooutFeeder()
+        self._paused_position = nil
         self.is_paused = false
         if self._pause_start_time then
             self._total_pause_ms = self._total_pause_ms + time.to_ms(UIManager:getTime() - self._pause_start_time)
             self._pause_start_time = nil
         end
+        self._resume_hold_pos = resume_pos or 0
+        self._resume_hold_until = UIManager:getTime() + time.s(2)
         self._audioout_client:resume((resume_pos or 0) * 1000)
         if not self._audioout_ext_dec then
             self:_spawnAudiooutFeeder(resume_pos, self:_persistentFilterChain(), "")
@@ -3098,6 +3267,7 @@ function MediaEngine:stop()
     self:_nextGeneration()
     self.is_playing = false
     self.is_paused = false
+    self._audioout_released_on_pause = nil
 
     if self._position_timer then
         UIManager:unschedule(self._position_timer)
@@ -3110,7 +3280,14 @@ function MediaEngine:stop()
 
     if self._audioout_external then
         self:_killAudiooutFeeder()
-        if self._audioout_client then self._audioout_client:stop() end
+        if self._audioout_client then
+            self._audioout_client:stop()
+            -- MTK: a stopped daemon does not answer the next externalStart
+            -- (9 s stall, then respawn). Release it so every start is fresh.
+            if self._use_persistent_pipeline then
+                self._audioout_client:killDaemon()
+            end
+        end
         self._audioout_external = false
     end
     -- Kill audio process (for most backends).
@@ -3591,6 +3768,17 @@ function MediaEngine:getPosition()
         end)
         if ok_st and st and st.pos_ms then
             local pos = st.pos_ms / 1000
+            -- Right after resume the daemon's first status adds its
+            -- accumulated play time to the resume point; hold the resume mark.
+            if self._resume_hold_until then
+                if UIManager:getTime() < self._resume_hold_until then
+                    if pos > (self._resume_hold_pos or 0) + 5 then
+                        pos = self._resume_hold_pos
+                    end
+                else
+                    self._resume_hold_until = nil
+                end
+            end
             if not self.is_paused then
                 self._seek_offset = pos
             end

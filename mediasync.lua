@@ -191,6 +191,14 @@ function MediaSync:_gotoSmilFragment(text_doc, fragment_id, allow_scan, sentence
             ui.rolling:_gotoXPointer(cached)
         end)
         if ok then
+            -- _gotoXPointer leaves ReaderRolling's xpointer at the old page,
+            -- so the next re-render (e.g. closing the player) jumped back to
+            -- where playback started.
+            pcall(function()
+                if ui.document.getXPointer then
+                    ui.rolling.xpointer = ui.document:getXPointer()
+                end
+            end)
             UIManager:setDirty("all", "ui")
             return true
         end
@@ -882,6 +890,28 @@ function MediaSync:stop(keep_chapter_menu, opts)
     local track_transition = opts.track_transition and true or false
     local drop_chrome = opts.drop_chrome and true or false
     local was_playing = self.state ~= self.STATE.STOPPED
+    -- Sync ReaderRolling to the page actually shown before the stop
+    -- re-renders, or the view snaps back to the session start.
+    if was_playing and not track_transition
+            and not (self.plugin and self.plugin._readaloud_browsing_away) then
+        pcall(function()
+            local ui = self.plugin and self.plugin.ui
+            if not (ui and ui.rolling and ui.document) then return end
+            -- Prefer the sentence being read: the page-top xpointer can resolve
+            -- to the end of the previous page.
+            local idx = self._highlighted_sentence_idx or self._current_sentence_idx
+            local e = idx and self.timing_data and self.timing_data[idx]
+            local xp
+            if e and e.fragment_id and e.text_doc and e.text_doc ~= "" and self._xpointer_cache then
+                xp = self._xpointer_cache[e.text_doc .. "#" .. e.fragment_id]
+            end
+            if xp then
+                ui.rolling.xpointer = xp
+            elseif ui.document.getXPointer then
+                ui.rolling.xpointer = ui.document:getXPointer()
+            end
+        end)
+    end
     if self.overlay_mode and was_playing and not track_transition
         and self.plugin and self.plugin._saveCurrentAlignedProgress then
         pcall(function() self.plugin:_saveCurrentAlignedProgress() end)
@@ -1853,6 +1883,10 @@ function MediaSync:_startSyncLoop(gen)
         UIManager:unschedule(self._sync_timer)
         self._sync_timer = nil
     end
+    -- E-ink readers are slow (the Kobo Clara BW has one core, already busy
+    -- with Bluetooth audio): 20 Hz there starves touch handling, and a
+    -- sentence highlight does not need better than ~0.15 s.
+    local tick_s = (Device.hasEinkScreen and Device:hasEinkScreen()) and 0.15 or 0.05
     local function tick()
         if self._chain_generation ~= gen or self.state ~= self.STATE.PLAYING then
             return
@@ -1861,7 +1895,7 @@ function MediaSync:_startSyncLoop(gen)
         local ok, pos = pcall(function() return self.media_engine:getPosition() end)
         if not ok then
             logger.err("MediaSync: getPosition() error in sync loop:", pos)
-            self._sync_timer = UIManager:scheduleIn(0.05, tick)
+            self._sync_timer = UIManager:scheduleIn(tick_s, tick)
             return
         end
 
@@ -1877,10 +1911,10 @@ function MediaSync:_startSyncLoop(gen)
         -- Check for sentence/chapter boundary advancement
         self:_checkAutoAdvance(pos)
 
-        self._sync_timer = UIManager:scheduleIn(0.05, tick)
+        self._sync_timer = UIManager:scheduleIn(tick_s, tick)
     end
 
-    self._sync_timer = UIManager:scheduleIn(0.05, tick)
+    self._sync_timer = UIManager:scheduleIn(tick_s, tick)
 end
 
 function MediaSync:_updateHighlightAtTime(pos)
@@ -1899,6 +1933,15 @@ function MediaSync:_updateHighlightAtTime(pos)
         self._current_word_idx = 1
         self._hl_fail_count = 0
         self._hl_retry_at = nil
+        -- Full-screen player's line-by-line view.
+        local bar = self.playback_bar
+        if bar and bar.lines_mode and bar.setLines then
+            local td = self.timing_data
+            local function lineText(i)
+                return td[i] and td[i].text or ""
+            end
+            pcall(bar.setLines, bar, lineText(sent_idx - 1), lineText(sent_idx), lineText(sent_idx + 1))
+        end
         -- E-ink cue grouping (issue #97): narration advancing inside an
         -- already-painted visual group repaints nothing, jumps nothing, and
         -- skips page-follow; the next group's entry change re-enters here.
@@ -2676,6 +2719,7 @@ function MediaSync:showPlaybackBar()
         -- Read-along (EPUB overlay) mode: start minimized so the book page
         -- stays visible; highlighting and page-follow are the primary UI.
         start_minimized = self.overlay_mode or nil,
+        lines_mode = self.overlay_mode or nil,
         on_sync_nudge = self.overlay_mode and function(delta_ms)
             local p = self.plugin
             if not (p and p.getSetting) then return nil end
