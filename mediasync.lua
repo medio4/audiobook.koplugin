@@ -1883,6 +1883,10 @@ function MediaSync:_startSyncLoop(gen)
         UIManager:unschedule(self._sync_timer)
         self._sync_timer = nil
     end
+    -- E-ink readers are slow (the Kobo Clara BW has one core, already busy
+    -- with Bluetooth audio): 20 Hz there starves touch handling, and a
+    -- sentence highlight does not need better than ~0.15 s.
+    local tick_s = (Device.hasEinkScreen and Device:hasEinkScreen()) and 0.15 or 0.05
     local function tick()
         if self._chain_generation ~= gen or self.state ~= self.STATE.PLAYING then
             return
@@ -1891,7 +1895,7 @@ function MediaSync:_startSyncLoop(gen)
         local ok, pos = pcall(function() return self.media_engine:getPosition() end)
         if not ok then
             logger.err("MediaSync: getPosition() error in sync loop:", pos)
-            self._sync_timer = UIManager:scheduleIn(0.05, tick)
+            self._sync_timer = UIManager:scheduleIn(tick_s, tick)
             return
         end
 
@@ -1907,10 +1911,10 @@ function MediaSync:_startSyncLoop(gen)
         -- Check for sentence/chapter boundary advancement
         self:_checkAutoAdvance(pos)
 
-        self._sync_timer = UIManager:scheduleIn(0.05, tick)
+        self._sync_timer = UIManager:scheduleIn(tick_s, tick)
     end
 
-    self._sync_timer = UIManager:scheduleIn(0.05, tick)
+    self._sync_timer = UIManager:scheduleIn(tick_s, tick)
 end
 
 function MediaSync:_updateHighlightAtTime(pos)
