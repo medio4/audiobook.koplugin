@@ -32,6 +32,7 @@ local LineWidget = require("ui/widget/linewidget")
 local ProgressWidget = require("ui/widget/progresswidget")
 local RenderText = require("ui/rendertext")
 local Size = require("ui/size")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
@@ -90,6 +91,9 @@ local AudiobookPlayer = InputContainer:extend{
     -- mini bar instead of SMIL sync-offset nudges, plus a settings picker.
     tts_mode = false,
     on_tts_settings = nil,
+    -- Read-along: the full-screen player shows the narration line by line
+    -- (previous / current / next sentence, see setLines) in place of the cover.
+    lines_mode = false,
     -- TTS read-along only: hide_tts_progress_bar drops the scrubber row from
     -- the full player (the widget still exists for the scrub/seek code).
     show_progress = true,
@@ -346,7 +350,15 @@ function AudiobookPlayer:setupUI()
         self._cover_width = math.floor(self.width * 0.6)
         self._cover_height = math.min(self._cover_width, max_cover_h)
     end
-    self.cover_frame = self:_buildCoverFrame()
+    if self.lines_mode then
+        local is_wide = self.width > self.height
+        self._cover_width = self.width - spacing * 4
+        self._cover_height = is_wide and max_cover_h or math.floor(self.height * 0.45)
+        self.cover_frame = self:_buildLinesFrame()
+    else
+        self._line_slots = nil
+        self.cover_frame = self:_buildCoverFrame()
+    end
 
     -- ── Metadata under cover ──
     self.chapter_widget = TextWidget:new{
@@ -1457,6 +1469,86 @@ function AudiobookPlayer:_buildCoverFrame()
     if not self._cover_frame_cache then self._cover_frame_cache = {} end
     self._cover_frame_cache[cache_key] = frame
     return frame
+end
+
+--- One wrapped, centered line of the line-by-line view.  Text taller than
+--- its slot is cut with an ellipsis rather than spilling into its neighbours.
+function AudiobookPlayer:_makeLineWidget(i, text)
+    local spec = self._line_specs[i]
+    local function build(height)
+        return TextBoxWidget:new{
+            text = text or "",
+            face = Font:getFace("cfont", spec.size),
+            bold = spec.bold,
+            fgcolor = spec.color,
+            bgcolor = self:_getThemeBackground(),
+            width = self._cover_width,
+            alignment = "center",
+            height = height,
+            height_adjust = height and true or false,
+            height_overflow_show_ellipsis = height and true or false,
+        }
+    end
+    local w = build(nil)
+    if w:getSize().h > spec.h then
+        w:free()
+        w = build(spec.h)
+    end
+    return w
+end
+
+--- Line-by-line view: the sentence being narrated, large and bold, with the
+--- previous and next sentences in gray above and below it.
+function AudiobookPlayer:_buildLinesFrame()
+    local h = self._cover_height
+    local gap = Size.padding.large
+    local side_h = math.floor(h * 0.22)
+    self._line_specs = {
+        { size = 17, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
+        { size = 26, bold = true, color = Blitbuffer.COLOR_BLACK, h = h - side_h * 2 - gap * 2 },
+        { size = 17, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
+    }
+    local lines = self._lines or {}
+    self._line_slots = {}
+    local group = VerticalGroup:new{ align = "center" }
+    for i = 1, 3 do
+        self._line_slots[i] = CenterContainer:new{
+            dimen = Geom:new{ w = self._cover_width, h = self._line_specs[i].h },
+            self:_makeLineWidget(i, lines[i]),
+        }
+        if i > 1 then
+            table.insert(group, VerticalSpan:new{ width = gap })
+        end
+        table.insert(group, self._line_slots[i])
+    end
+    return FrameContainer:new{
+        background = self:_getThemeBackground(),
+        bordersize = 0,
+        padding = 0,
+        group,
+    }
+end
+
+--- Show the narration's previous, current and next sentence (lines_mode).
+function AudiobookPlayer:setLines(prev, cur, nxt)
+    local lines = { prev or "", cur or "", nxt or "" }
+    local old = self._lines
+    if old and old[1] == lines[1] and old[2] == lines[2] and old[3] == lines[3] then return end
+    self._lines = lines
+    if not self._line_slots then return end
+    for i = 1, 3 do
+        if not old or old[i] ~= lines[i] then
+            local slot = self._line_slots[i]
+            local stale = slot[1]
+            slot[1] = self:_makeLineWidget(i, lines[i])
+            if stale and stale.free then stale:free() end
+        end
+    end
+    if self.visible and not self._minimized and not self.suppressed then
+        UIManager:setDirty(self, function()
+            return "ui", self.cover_frame and self.cover_frame.dimen or nil
+        end)
+    end
 end
 
 function AudiobookPlayer:setCoverImage(path)

@@ -1929,6 +1929,15 @@ function MediaSync:_updateHighlightAtTime(pos)
         self._current_word_idx = 1
         self._hl_fail_count = 0
         self._hl_retry_at = nil
+        -- Full-screen player's line-by-line view.
+        local bar = self.playback_bar
+        if bar and bar.lines_mode and bar.setLines then
+            local td = self.timing_data
+            local function lineText(i)
+                return td[i] and td[i].text or ""
+            end
+            pcall(bar.setLines, bar, lineText(sent_idx - 1), lineText(sent_idx), lineText(sent_idx + 1))
+        end
         -- E-ink cue grouping (issue #97): narration advancing inside an
         -- already-painted visual group repaints nothing, jumps nothing, and
         -- skips page-follow; the next group's entry change re-enters here.
@@ -2706,6 +2715,7 @@ function MediaSync:showPlaybackBar()
         -- Read-along (EPUB overlay) mode: start minimized so the book page
         -- stays visible; highlighting and page-follow are the primary UI.
         start_minimized = self.overlay_mode or nil,
+        lines_mode = self.overlay_mode or nil,
         on_sync_nudge = self.overlay_mode and function(delta_ms)
             local p = self.plugin
             if not (p and p.getSetting) then return nil end
