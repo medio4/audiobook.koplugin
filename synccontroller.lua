@@ -2038,6 +2038,8 @@ function SyncController:showPlaybackBar()
         chapter_title = "",
         output_name = title,
         tts_mode = true,
+        large_mini_bar = plugin and plugin.getSetting
+            and plugin:getSetting("large_mini_bar", false) or nil,
         start_minimized = true,
         keep_reader_status_bars = keep_footer,
         playback_speed = speech_rate,
@@ -2729,7 +2731,7 @@ function SyncController:highlightCurrentWord(word)
     local android_tts = self.tts_engine
         and self.tts_engine.backend == self.tts_engine.BACKENDS.ANDROID
     if not android_tts
-        and self.plugin and self.plugin:getSetting("highlight_words", true) then
+        and self.plugin and self.plugin:getSetting("highlight_words", false) then
         self.highlight_manager:highlightWord(word, self.parsed_data)
     end
 end

@@ -904,6 +904,26 @@ function Audiobook:addToMainMenu(menu_items)
                         end,
                     },
                     {
+                        text = _("Highlight words"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("highlight_words", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("highlight_words", false)
+                            -- A word box may be on screen right now; drop it
+                            -- so switching off takes effect immediately
+                            -- instead of at the next sentence.
+                            if not self:getSetting("highlight_words", false)
+                                    and self.highlight_manager then
+                                pcall(function()
+                                    self.highlight_manager:clearWordHighlight()
+                                end)
+                            end
+                        end,
+                        help_text = _("Paint the word being narrated as a moving highlight inside the sentence highlight. Off by default: word highlighting needs one e-ink refresh per spoken word, and on slower devices those refreshes can skip words or flash, so sentence-only highlighting reads better there. The current word still appears as text in the read-along bar."),
+                    },
+                    {
                         text = _("Group short cues (e-ink)"),
                         enabled_func = function() return (self.ui and self.ui.document) or false end,
                         checked_func = function()
@@ -1115,6 +1135,26 @@ function Audiobook:addToMainMenu(menu_items)
                             })
                         end,
                         help_text = _("Shifts EPUB Media Overlay sentence highlighting relative to the audio. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio."),
+                    },
+                    {
+                        text = _("Large player bar"),
+                        checked_func = function()
+                            return self:getSetting("large_mini_bar", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("large_mini_bar", false)
+                        end,
+                        help_text = _("A taller read-along bar with bigger buttons that are easier to hit. Applies the next time playback starts."),
+                    },
+                    {
+                        text = _("Line-by-line view in the full-screen player"),
+                        checked_func = function()
+                            return self:getSetting("player_line_view", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("player_line_view", false)
+                        end,
+                        help_text = _("EPUB read-along: the full-screen player shows the previous, current and next sentence in place of the cover, with sync adjusters below. Applies the next time playback starts."),
                     },
                 },
             },
@@ -4739,13 +4779,15 @@ function Audiobook:getSetting(key, default)
     return default
 end
 
-function Audiobook:setSetting(key, value)
+--- @param no_flush boolean|nil  skip the immediate disk flush (rapid UI
+---   nudges; KOReader still writes the settings on suspend and exit)
+function Audiobook:setSetting(key, value, no_flush)
     local settings = G_reader_settings:readSetting("audiobook_settings") or {}
     settings[key] = value
     G_reader_settings:saveSetting("audiobook_settings", settings)
     -- Force an immediate disk flush so the value survives a crash or forced
     -- restart (e.g. the chapter-list crash that triggered issue #38).
-    if G_reader_settings and G_reader_settings.flush then
+    if not no_flush and G_reader_settings and G_reader_settings.flush then
         G_reader_settings:flush()
     end
 end
@@ -4816,7 +4858,12 @@ function Audiobook:_saveSmilXPointerCache(doc_path, cache)
     if not doc_path or not cache then return end
     local all = self:getSetting("smil_xpointer_cache", {})
     all[doc_path] = cache
-    self:setSetting("smil_xpointer_cache", all)
+    -- No flush: this runs for every newly resolved sentence during
+    -- read-along, and the cache makes the settings file large (hundreds of
+    -- KB after a few chapters), so flushing here rewrote all of it every few
+    -- seconds of narration.  KOReader writes it on suspend and exit; a lost
+    -- cache entry is simply resolved again.
+    self:setSetting("smil_xpointer_cache", all, true)
 end
 
 -- Count entries in a table for logging.

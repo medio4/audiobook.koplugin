@@ -1123,6 +1123,7 @@ function HighlightManager:_wordScreenBoxes(c0, c1)
     if line0 == line1 then
         local box = ctx.sboxes[line0]
         local lo_c = ctx.cum[line0 - 1] or 0
+        local hi_c = ctx.cum[line0]
         local y = box.y + math.floor(box.h / 2)
         local right = box.x + box.w
         local target0 = c0 - lo_c
@@ -1201,7 +1202,7 @@ function HighlightManager:highlightWord(word, parsed_data)
     if not word or not word.text then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
     if self.plugin and self.plugin.getSetting
-            and self.plugin:getSetting("highlight_words", true) == false then
+            and self.plugin:getSetting("highlight_words", false) ~= true then
         return
     end
     local ctx = self._word_ctx

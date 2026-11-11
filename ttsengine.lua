@@ -2086,6 +2086,13 @@ function TTSEngine:prefetch(text, use_espeak, idx)
     if self.backend == self.BACKENDS.ANDROID then
         return self:prefetchAndroid(text, idx)
     end
+    -- Platform-native helpers answer asynchronously, like Android: the
+    -- generic slot fill below races (duplicate launches, a cleaned-up slot
+    -- file, clobbered current_audio_file), so synthesize on demand instead
+    -- (issue #110).
+    if self.backend == self.BACKENDS.NATIVE then
+        return false
+    end
     -- Piper/sanoTTS: delegate to the async queue-based prefetcher
     if (self.backend == self.BACKENDS.PIPER or self.backend == self.BACKENDS.SANOTTS
             or self.backend == self.BACKENDS.SANOTTS_JP)
@@ -4264,6 +4271,18 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         -- process death must name the native step in flight.
         dlog("player-spawn", "pid", pid, "gen", my_gen,
             "bundled", from_bundled, "wav", file_path)
+        -- Issue #114: report the dead air between the previous sentence's
+        -- clean player exit and this spawn, so bug reports quantify the
+        -- per-sentence pipeline startup cost directly. Only the clean-finish
+        -- path sets _last_play_end_at, so fallback re-launches inside one
+        -- sentence never produce a bogus gap.
+        if self._last_play_end_at then
+            local gap_ms = time.to_ms(UIManager:getTime() - self._last_play_end_at)
+            if gap_ms >= 0 and gap_ms < 60000 then
+                dlog("player-gap", "ms", gap_ms)
+            end
+            self._last_play_end_at = nil
+        end
         self:startTimingLoop()
         -- Poll /proc/<pid> for process completion.
         -- When the process exits, check its status to distinguish
@@ -4276,6 +4295,10 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         -- but the log hasn't progressed beyond initial loading, assume hung.
         local health_check_polls = 25   -- 2.5s (poll interval is 0.1s)
         local health_checked = false
+        -- Issue #114: sample the helper's stderr log until it reports
+        -- PLAYING, so bug reports carry the spawn-to-preroll latency (the
+        -- per-sentence startup cost a persistent pipeline would remove).
+        local preroll_logged = false
         local function pollGstPlayDone()
             if (engine.play_generation or 0) ~= my_gen then return end
             if not engine.is_speaking then return end
@@ -4284,6 +4307,22 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                 return
             end
             poll_count = poll_count + 1
+            -- Issue #114: sample the helper's stderr log until it reports
+            -- PLAYING, so bug reports carry the spawn-to-preroll latency (the
+            -- per-sentence startup cost a persistent pipeline would remove).
+            if from_bundled and not preroll_logged and poll_count % 5 == 0 then
+                local pfh = io.open("/tmp/.gst_play_last.log", "r")
+                if pfh then
+                    local ptext = pfh:read("*a") or ""
+                    pfh:close()
+                    if ptext:match("state=PLAYING") then
+                        preroll_logged = true
+                        dlog("player-preroll", "ms",
+                            time.to_ms(UIManager:getTime() - engine._audio_launched_at),
+                            "polls", poll_count)
+                    end
+                end
+            end
             -- Check if process still running via /proc
             local proc_fh = pid and io.open("/proc/" .. pid .. "/status", "r")
             if proc_fh then
@@ -4440,6 +4479,8 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                 end
                 logger.warn("TTSEngine: kindle-gst-play finished, polls=", poll_count)
                 engine._gst_play_pid = nil
+                -- Issue #114: anchor for the next spawn's player-gap line.
+                engine._last_play_end_at = UIManager:getTime()
                 -- Clean up system fallback raw PCM file if present
                 if engine._gst_system_raw_file then
                     os.remove(engine._gst_system_raw_file)
@@ -6258,11 +6299,16 @@ end
 -- (filesrc /dev/zero ! mixersink) in the mixer for the whole reading
 -- session keeps the datapath up so sentence streams start instantly.
 -- Verified on PW5: zero suspend_audio_datapath events while running.
--- On the 5.17+ generation (no gst-launch-0.10) the silence stream is
--- currently SKIPPED: the GStreamer 1.0 variant shipped in v0.6.2 and two
--- 5.19.x devices have lost the KOReader process mid-sentence ever since
--- (issue #73), so until the crash is attributed, that path runs without
--- the stream and only takes Music focus.
+-- The stream also runs over GStreamer 1.0 on the 5.17+ generation (no
+-- gst-launch-0.10 there).  It was briefly skipped on that path while two
+-- 5.19.x crash reports were attributed to it (issue #73), but the crash
+-- evidence dissolved: the kernel side stayed clean, and both reporting
+-- devices turned out to run non-standard environments (a third-party
+-- KOReader shell that power-cycles Bluetooth at startup, and a dev
+-- build 275 commits past stable).  Meanwhile the skip had its own
+-- visible cost: with the datapath suspending between sentences, every
+-- sentence start swallowed a second of re-attach stutter over
+-- Bluetooth (issue #114).
 function TTSEngine:_ensureKindleKeepalive()
     -- Remember a failed probe for the rest of the session: without this,
     -- every sentence would re-run commandExists + io.popen on firmware
@@ -6283,17 +6329,11 @@ function TTSEngine:_ensureKindleKeepalive()
             .. " ! 'audio/x-raw-int,rate=22050,channels=1,width=16,depth=16,signed=true,endianness=1234'"
             .. " ! mixersink stream-type=Music sync=true >/dev/null 2>&1 & echo $!"
     elseif self:commandExists("gst-launch-1.0") then
-        -- 5.17+ firmware (juno generation, no gst-launch-0.10): SKIP the
-        -- silence stream.  It is the only always-on audio stream v0.6.2
-        -- introduced on this path, and since it shipped, two 5.19.x
-        -- devices lose the whole KOReader process a couple of words into
-        -- every TTS session (issue #73).  Until the crash log names the
-        -- real cause, return this path to the v0.6.1 stream profile; the
-        -- focus take above still runs, and sentence gaps just pay the
-        -- datapath resume the stream used to avoid.
-        self._keepalive_unavailable = true
-        logger.warn("TTSEngine: skipping A2DP keepalive stream on gst-launch-1.0-only firmware (issue #73)")
-        return
+        cmd = "gst-launch-1.0 filesrc location=/dev/zero"
+            .. " ! rawaudioparse use-sink-caps=false format=pcm pcm-format=s16le"
+            .. " sample-rate=22050 num-channels=1"
+            .. " ! audioconvert ! audio/x-raw,format=S16LE,rate=22050,channels=1,layout=interleaved"
+            .. " ! mixersink stream-type=Music sync=true >/dev/null 2>&1 & echo $!"
     else
         self._keepalive_unavailable = true
         logger.warn("TTSEngine: no gst-launch binary for Kindle A2DP keepalive")
