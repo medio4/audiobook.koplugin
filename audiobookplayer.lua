@@ -353,7 +353,9 @@ function AudiobookPlayer:setupUI()
     if self.lines_mode then
         local is_wide = self.width > self.height
         self._cover_width = self.width - spacing * 4
-        self._cover_height = is_wide and max_cover_h or math.floor(self.height * 0.45)
+        -- Portrait read-along also carries the sync row, so leave it room.
+        self._cover_height = is_wide and max_cover_h
+            or math.floor(self.height * (self.on_sync_nudge and 0.38 or 0.45))
         self.cover_frame = self:_buildLinesFrame()
     else
         self._line_slots = nil
@@ -479,6 +481,44 @@ function AudiobookPlayer:setupUI()
     }
 
     local is_landscape = self.width > self.height
+    -- Read-along: sync adjusters, same job as the mini bar's − / +.
+    local sync_row
+    if self.on_sync_nudge and not is_landscape then
+        self.sync_widget = TextWidget:new{
+            text = self:_syncText(),
+            face = Font:getFace("cfont", 16),
+        }
+        local function syncButton(text, delta)
+            return Button:new{
+                text = text,
+                width = button_size,
+                height = button_size,
+                text_font_size = 24,
+                callback = function() self:_nudgeSync(delta) end,
+                bordersize = Size.border.thin,
+                radius = Screen:scaleBySize(6),
+                show_parent = self,
+            }
+        end
+        self.sync_minus_button = syncButton("−", -100)
+        self.sync_plus_button = syncButton("+", 100)
+        self._sync_label_box = CenterContainer:new{
+            dimen = Geom:new{ w = button_size * 3, h = button_size },
+            self.sync_widget,
+        }
+        sync_row = HorizontalGroup:new{
+            align = "center",
+            self.sync_minus_button,
+            HorizontalSpan:new{ width = spacing },
+            self._sync_label_box,
+            HorizontalSpan:new{ width = spacing },
+            self.sync_plus_button,
+        }
+    else
+        self.sync_widget, self.sync_minus_button, self.sync_plus_button = nil, nil, nil
+        self._sync_label_box = nil
+    end
+
     local control_row, volume_row
     if is_landscape then
         -- Landscape: single row [-] [<30] [<<] [play] [>>] [30>] [+] [90%]
@@ -592,6 +632,15 @@ function AudiobookPlayer:setupUI()
                 volume_row,
             })
     end
+    if sync_row then
+        table.insert(content,
+            VerticalSpan:new{ width = self.height * 0.02 })
+        table.insert(content,
+            CenterContainer:new{
+                dimen = Geom:new{ w = self.width, h = button_size },
+                sync_row,
+            })
+    end
     table.insert(content, VerticalSpan:new{ width = Size.padding.small })
 
     -- Match the reader's configured background color so the player blends with
@@ -686,16 +735,8 @@ function AudiobookPlayer:setupUI()
         -- at once.  Going through plugin:setSetting flushed the whole reader
         -- settings file on every tap, which froze the UI for seconds; KOReader
         -- writes the settings itself on suspend and exit.
-        local function nudge(delta_ms)
-            local settings = G_reader_settings:readSetting("audiobook_settings") or {}
-            local v = (settings.smil_sync_offset_ms or 0) + delta_ms
-            settings.smil_sync_offset_ms = v
-            G_reader_settings:saveSetting("audiobook_settings", settings)
-            local ok, err = pcall(self._showSyncOverlay, self, v)
-            if not ok then logger.err("ABP: sync overlay failed:", err) end
-        end
-        self._mini_sync_minus = miniButton("−", 22, function() nudge(-100) end)
-        self._mini_sync_plus = miniButton("+", 22, function() nudge(100) end)
+        self._mini_sync_minus = miniButton("−", 22, function() self:_nudgeSync(-100) end)
+        self._mini_sync_plus = miniButton("+", 22, function() self:_nudgeSync(100) end)
         right_buttons = { self._mini_sync_minus, self._mini_sync_plus }
     end
     if self._mini_refocus then
@@ -2161,6 +2202,17 @@ function AudiobookPlayer:handleEvent(event)
         end
 
         -- Tap handling
+        -- Two quick presses of a sync button arrive as one double_tap.
+        if ges.ges == "double_tap" and ges.pos then
+            for _i, b in ipairs{ self.sync_minus_button, self.sync_plus_button } do
+                if self:_isTapOnWidget(ges.pos, b) then
+                    b.callback()
+                    b.callback()
+                    return true
+                end
+            end
+        end
+
         if ges.ges == "tap" and ges.pos then
             -- If we were dragging and got a tap instead of pan_release, complete the seek
             -- only if the tap is on or near the progress bar.  Otherwise cancel the drag.
@@ -2194,8 +2246,12 @@ function AudiobookPlayer:handleEvent(event)
                 self.speed_button, self.close_button, self.minimize_button,
                 self.chapter_list_button, self.sleep_timer_button,
                 self.vol_minus_button, self.vol_plus_button,
-                self.settings_button,
             }
+            -- Optional buttons go in one by one: a nil inside the list above
+            -- would end ipairs early.
+            for _i, b in ipairs{ "settings_button", "sync_minus_button", "sync_plus_button" } do
+                if self[b] then table.insert(buttons, self[b]) end
+            end
             if self.show_shuffle and self.shuffle_button then
                 table.insert(buttons, self.shuffle_button)
             end
@@ -2383,6 +2439,36 @@ function AudiobookPlayer:onCloseWidget()
         self._speed_dialog = nil
     end
     self:_closeSyncOverlay()
+end
+
+function AudiobookPlayer:_syncOffsetMs()
+    local settings = G_reader_settings:readSetting("audiobook_settings") or {}
+    return settings.smil_sync_offset_ms or 0
+end
+
+function AudiobookPlayer:_syncText()
+    return string.format(_("Sync %+.1f s"), self:_syncOffsetMs() / 1000)
+end
+
+--- Shift the read-along highlight timing (see the mini bar's − / + comment).
+--- Minimized: the new value shows in an overlay above the bar.  Full screen:
+--- the label between the sync buttons updates in place.
+function AudiobookPlayer:_nudgeSync(delta_ms)
+    local settings = G_reader_settings:readSetting("audiobook_settings") or {}
+    local v = (settings.smil_sync_offset_ms or 0) + delta_ms
+    settings.smil_sync_offset_ms = v
+    G_reader_settings:saveSetting("audiobook_settings", settings)
+    if self.sync_widget then
+        self.sync_widget:setText(self:_syncText())
+    end
+    if self._minimized then
+        local ok, err = pcall(self._showSyncOverlay, self, v)
+        if not ok then logger.err("ABP: sync overlay failed:", err) end
+    elseif self._sync_label_box then
+        UIManager:setDirty(self, function()
+            return "fast", self._sync_label_box.dimen
+        end)
+    end
 end
 
 --- Read-along sync nudges: show the new offset in a box just above the mini
