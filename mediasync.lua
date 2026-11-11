@@ -900,6 +900,12 @@ function MediaSync:stop(keep_chapter_menu, opts)
             -- Prefer the sentence being read: the page-top xpointer can resolve
             -- to the end of the previous page.
             local idx = self._highlighted_sentence_idx or self._current_sentence_idx
+            -- _highlighted_sentence_idx is a cue-GROUP id when grouping is
+            -- active; timing_data is indexed by entry, so map a group back
+            -- to its first member before indexing.
+            if idx and self._cue_groups and self._cue_groups[idx] then
+                idx = self._cue_groups[idx].first
+            end
             local e = idx and self.timing_data and self.timing_data[idx]
             local xp
             if e and e.fragment_id and e.text_doc and e.text_doc ~= "" and self._xpointer_cache then
