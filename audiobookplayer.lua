@@ -28,6 +28,7 @@ local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local ImageWidget = require("ui/widget/imagewidget")
 local InputContainer = require("ui/widget/container/inputcontainer")
+local LineWidget = require("ui/widget/linewidget")
 local ProgressWidget = require("ui/widget/progresswidget")
 local RenderText = require("ui/rendertext")
 local Size = require("ui/size")
@@ -598,52 +599,62 @@ function AudiobookPlayer:setupUI()
     self.dimen.y = 0
 
     -- ── Mini-player bar (shown when minimized) ──
-    self._mini_height = Screen:scaleBySize(44)
-    local mini_btn_size = self._mini_height - 20  -- keep clear of the mini bar border
+    -- Sized for fingers on e-ink: a tall strip, buttons that answer to their
+    -- whole column (see _isTapOnMiniButton), a wide outlined play/pause as
+    -- the anchor, and a single rule on top instead of a boxed frame.
+    self._mini_height = Screen:scaleBySize(64)
+    local rule_h = Size.line.thick
+    local inner_h = self._mini_height - rule_h
+    local gap = Size.padding.large
+    self._mini_hit_slop = math.floor(gap / 2)
 
-    self._mini_play_pause = Button:new{
-        text = self.is_playing and "⏸" or "▶",
-        width = mini_btn_size,
-        height = mini_btn_size,
-        text_font_size = 18,
-        callback = function() self:onPlayPause() end,
-        bordersize = 0,
-        show_parent = self,
-    }
+    -- Count the buttons this bar will carry so they can shrink together on
+    -- narrow screens instead of squeezing the title to nothing.
+    local n_buttons = 1 -- close
+    if self.on_refocus then n_buttons = n_buttons + 1 end
+    if self.on_chapter_list then n_buttons = n_buttons + 1 end
+    if self.tts_mode or self.on_sync_nudge then n_buttons = n_buttons + 2 end
+    if not self.tts_mode and self.on_volume then n_buttons = n_buttons + 2 end
+    local play_ratio = 1.5
+    local n_gaps = n_buttons + 4 -- between items, around the title and separator
+    local mini_btn_size = math.min(
+        inner_h - Screen:scaleBySize(8),
+        math.floor((self.width * 0.75 - gap * n_gaps) / (n_buttons + play_ratio)))
+    local play_w = math.floor(mini_btn_size * play_ratio)
 
-    self._mini_close = Button:new{
-        text = "✕",
-        width = mini_btn_size,
-        height = mini_btn_size,
-        text_font_size = 16,
-        callback = function() self:onClose() end,
-        bordersize = 0,
-        show_parent = self,
-    }
-
-    local refocus_group = {}
-    if self.on_refocus then
-        self._mini_refocus = Button:new{
-            text = "○",
+    local function miniButton(text, font_size, callback)
+        return Button:new{
+            text = text,
             width = mini_btn_size,
             height = mini_btn_size,
-            text_font_size = 18,
-            callback = function() self:onRefocus() end,
+            text_font_size = font_size,
+            callback = callback,
             bordersize = 0,
             show_parent = self,
         }
-        refocus_group = {
-            self._mini_refocus,
-            HorizontalSpan:new{ width = math.floor(spacing / 2) },
-        }
     end
 
-    -- Center: title + time stacked and centered.
-    -- Width is reduced as optional side button groups are added; the actual
-    -- TextWidgets are created after center_max_width is final.
-    local center_max_width = self.width - mini_btn_size * 2 - spacing * 4
+    self._mini_play_pause = Button:new{
+        text = self.is_playing and "⏸" or "▶",
+        width = play_w,
+        height = mini_btn_size,
+        text_font_size = 26,
+        callback = function() self:onPlayPause() end,
+        bordersize = Size.border.thick,
+        radius = Screen:scaleBySize(10),
+        show_parent = self,
+    }
+
+    self._mini_close = miniButton("✕", 20, function() self:onClose() end)
+
     if self.on_refocus then
-        center_max_width = center_max_width - mini_btn_size - spacing
+        self._mini_refocus = miniButton("○", 22, function() self:onRefocus() end)
+    end
+
+    -- Chapter list on the mini bar (overlay): avoids expanding the fullscreen
+    -- player just to tap ☰, which was crashing on Boox.
+    if self.on_chapter_list then
+        self._mini_chapters = miniButton("☰", 22, function() self:onChapterList() end)
     end
 
     -- Read-along: live sync-offset nudge buttons.  The sync loop reads the
@@ -653,33 +664,11 @@ function AudiobookPlayer:setupUI()
     -- TTS: this slot holds the speed button and the settings gear.  TTS has no
     -- full-screen player, so the gear is the way into voice, speed, pauses,
     -- volume and the sleep timer.
-    local nudge_group = {}
+    local right_buttons = {}
     if self.tts_mode then
-        self._mini_speed = Button:new{
-            text = self:_speedText(),
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 11,
-            callback = function() self:onSpeed() end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        self._mini_settings = Button:new{
-            text = "⚙",
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 16,
-            callback = function() self:onTtsSettings() end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        center_max_width = center_max_width - (mini_btn_size + spacing) * 2
-        nudge_group = {
-            self._mini_speed,
-            HorizontalSpan:new{ width = spacing },
-            self._mini_settings,
-            HorizontalSpan:new{ width = spacing },
-        }
+        self._mini_speed = miniButton(self:_speedText(), 15, function() self:onSpeed() end)
+        self._mini_settings = miniButton("⚙", 22, function() self:onTtsSettings() end)
+        right_buttons = { self._mini_speed, self._mini_settings }
     elseif self.on_sync_nudge then
         local function nudge(delta_ms)
             local v = self.on_sync_nudge(delta_ms)
@@ -690,84 +679,31 @@ function AudiobookPlayer:setupUI()
                 end)
             end
         end
-        self._mini_sync_minus = Button:new{
-            text = "−",
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 16,
-            callback = function() nudge(-100) end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        self._mini_sync_plus = Button:new{
-            text = "+",
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 16,
-            callback = function() nudge(100) end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        center_max_width = center_max_width - (mini_btn_size + spacing) * 2
-        nudge_group = {
-            self._mini_sync_minus,
-            HorizontalSpan:new{ width = spacing },
-            self._mini_sync_plus,
-            HorizontalSpan:new{ width = spacing },
-        }
+        self._mini_sync_minus = miniButton("−", 22, function() nudge(-100) end)
+        self._mini_sync_plus = miniButton("+", 22, function() nudge(100) end)
+        right_buttons = { self._mini_sync_minus, self._mini_sync_plus }
+    end
+    if self._mini_refocus then
+        table.insert(right_buttons, self._mini_refocus)
     end
 
     -- Volume nudge buttons (♪− / ♪+).  These belong to audiobook and music
     -- playback; TTS reaches volume from its settings gear instead, so its
     -- mini bar stays uncluttered.
-    local vol_group = {}
+    local left_buttons = { self._mini_play_pause }
+    if self._mini_chapters then
+        table.insert(left_buttons, self._mini_chapters)
+    end
     if not self.tts_mode and self.on_volume then
-        self._mini_vol_minus = Button:new{
-            text = "♪−",
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 13,
-            callback = function() self:_applyVolume(-10) end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        self._mini_vol_plus = Button:new{
-            text = "♪+",
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 13,
-            callback = function() self:_applyVolume(10) end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        center_max_width = center_max_width - (mini_btn_size + spacing) * 2
-        vol_group = {
-            self._mini_vol_minus,
-            HorizontalSpan:new{ width = spacing },
-            self._mini_vol_plus,
-            HorizontalSpan:new{ width = spacing },
-        }
+        self._mini_vol_minus = miniButton("♪−", 17, function() self:_applyVolume(-10) end)
+        self._mini_vol_plus = miniButton("♪+", 17, function() self:_applyVolume(10) end)
+        table.insert(left_buttons, self._mini_vol_minus)
+        table.insert(left_buttons, self._mini_vol_plus)
     end
 
-    -- Chapter list on the mini bar (overlay): avoids expanding the fullscreen
-    -- player just to tap ☰, which was crashing on Boox.
-    local chapter_group = {}
-    if self.on_chapter_list then
-        self._mini_chapters = Button:new{
-            text = "☰",
-            width = mini_btn_size,
-            height = mini_btn_size,
-            text_font_size = 16,
-            callback = function() self:onChapterList() end,
-            bordersize = 0,
-            show_parent = self,
-        }
-        center_max_width = center_max_width - mini_btn_size - spacing
-        chapter_group = {
-            self._mini_chapters,
-            HorizontalSpan:new{ width = spacing },
-        }
-    end
+    -- Whatever width the buttons leave goes to the centered title stack.
+    local center_max_width = self.width - play_w
+        - mini_btn_size * (n_buttons) - gap * n_gaps - Size.line.medium
 
     -- Create the centered title stack now that side buttons have reserved
     -- their full width, so the text cannot overlap the volume/sync buttons.
@@ -776,7 +712,7 @@ function AudiobookPlayer:setupUI()
     self._mini_title = TextWidget:new{
         text = (self.chapter_title and self.chapter_title ~= "" and self.chapter_title)
             or self.output_name or self.title or _("Audiobook"),
-        face = Font:getFace("cfont", 13),
+        face = Font:getFace("cfont", 15),
         max_width = center_max_width,
         truncate_left = false,
     }
@@ -790,50 +726,51 @@ function AudiobookPlayer:setupUI()
     else
         self._mini_time = TextWidget:new{
             text = self.current_time_str or "",
-            face = Font:getFace("cfont", 11),
+            face = Font:getFace("cfont", 13),
             max_width = center_max_width,
         }
         mini_center = VerticalGroup:new{
             align = "center",
             self._mini_title,
+            VerticalSpan:new{ width = Size.span.vertical_default },
             self._mini_time,
         }
     end
 
-    local mini_row = HorizontalGroup:new{
-        align = "center",
-        HorizontalSpan:new{ width = spacing },
-        self._mini_play_pause,
-        HorizontalSpan:new{ width = spacing },
-        chapter_group[1] or HorizontalSpan:new{ width = 0 },
-        chapter_group[2] or HorizontalSpan:new{ width = 0 },
-        vol_group[1] or HorizontalSpan:new{ width = 0 },
-        vol_group[2] or HorizontalSpan:new{ width = 0 },
-        vol_group[3] or HorizontalSpan:new{ width = 0 },
-        vol_group[4] or HorizontalSpan:new{ width = 0 },
-        CenterContainer:new{
-            dimen = Geom:new{ w = center_max_width, h = self._mini_height },
-            mini_center,
-        },
-        nudge_group[1] or HorizontalSpan:new{ width = 0 },
-        nudge_group[2] or HorizontalSpan:new{ width = 0 },
-        nudge_group[3] or HorizontalSpan:new{ width = 0 },
-        nudge_group[4] or HorizontalSpan:new{ width = 0 },
-        HorizontalSpan:new{ width = spacing },
-        refocus_group[1] or HorizontalSpan:new{ width = 0 },
-        refocus_group[2] or HorizontalSpan:new{ width = 0 },
-        self._mini_close,
-        HorizontalSpan:new{ width = spacing },
-    }
+    local row_items = { align = "center", HorizontalSpan:new{ width = gap } }
+    local function add(w)
+        table.insert(row_items, w)
+        table.insert(row_items, HorizontalSpan:new{ width = gap })
+    end
+    for _i, b in ipairs(left_buttons) do add(b) end
+    add(CenterContainer:new{
+        dimen = Geom:new{ w = center_max_width, h = inner_h },
+        mini_center,
+    })
+    for _i, b in ipairs(right_buttons) do add(b) end
+    -- A short divider keeps ✕ apart from the buttons used while listening.
+    add(LineWidget:new{
+        dimen = Geom:new{ w = Size.line.medium, h = math.floor(mini_btn_size * 0.6) },
+        background = Blitbuffer.COLOR_GRAY,
+    })
+    add(self._mini_close)
+    local mini_row = HorizontalGroup:new(row_items)
+
     self._mini_bar = FrameContainer:new{
         width = self.width,
         height = self._mini_height,
         background = self:_getThemeBackground(),
-        bordersize = Size.border.thin,
+        bordersize = 0,
         padding = 0,
-        CenterContainer:new{
-            dimen = Geom:new{ w = self.width, h = self._mini_height - Size.border.thin * 2 },
-            mini_row,
+        VerticalGroup:new{
+            LineWidget:new{
+                dimen = Geom:new{ w = self.width, h = rule_h },
+                background = Blitbuffer.COLOR_BLACK,
+            },
+            CenterContainer:new{
+                dimen = Geom:new{ w = self.width, h = inner_h },
+                mini_row,
+            },
         },
     }
 
@@ -1950,20 +1887,20 @@ function AudiobookPlayer:handleEvent(event)
                     and ges.pos.y < mini_y + self._mini_height
                     if on_bar and ges.ges == "tap" then
                     -- Tap on play/pause button?
-                    if self:_isTapOnWidget(ges.pos, self._mini_play_pause) then
+                    if self:_isTapOnMiniButton(ges.pos, self._mini_play_pause) then
                         self:onPlayPause()
                         return true
                     end
                     -- Tap on chapter list (mini ☰)?
                     if self._mini_chapters
-                        and self:_isTapOnWidget(ges.pos, self._mini_chapters) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_chapters) then
                         if self._mini_chapters.callback then
                             self._mini_chapters.callback()
                         end
                         return true
                     end
                     -- Tap on close button?
-                    if self:_isTapOnWidget(ges.pos, self._mini_close) then
+                    if self:_isTapOnMiniButton(ges.pos, self._mini_close) then
                         self:onClose()
                         return true
                     end
@@ -1973,14 +1910,14 @@ function AudiobookPlayer:handleEvent(event)
                     -- to _restore() and the buttons would appear dead.  Invoke
                     -- the same callback the Button carries.
                     if self._mini_sync_minus
-                        and self:_isTapOnWidget(ges.pos, self._mini_sync_minus) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_sync_minus) then
                         if self._mini_sync_minus.callback then
                             self._mini_sync_minus.callback()
                         end
                         return true
                     end
                     if self._mini_sync_plus
-                        and self:_isTapOnWidget(ges.pos, self._mini_sync_plus) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_sync_plus) then
                         if self._mini_sync_plus.callback then
                             self._mini_sync_plus.callback()
                         end
@@ -1988,14 +1925,14 @@ function AudiobookPlayer:handleEvent(event)
                     end
                     -- Volume buttons (audiobook / music mini bar).
                     if self._mini_vol_minus
-                        and self:_isTapOnWidget(ges.pos, self._mini_vol_minus) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_vol_minus) then
                         if self._mini_vol_minus.callback then
                             self._mini_vol_minus.callback()
                         end
                         return true
                     end
                     if self._mini_vol_plus
-                        and self:_isTapOnWidget(ges.pos, self._mini_vol_plus) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_vol_plus) then
                         if self._mini_vol_plus.callback then
                             self._mini_vol_plus.callback()
                         end
@@ -2004,18 +1941,18 @@ function AudiobookPlayer:handleEvent(event)
                     -- TTS mini bar: speed and settings occupy the sync-nudge
                     -- slot (TTS has no sync offset).
                     if self._mini_speed
-                        and self:_isTapOnWidget(ges.pos, self._mini_speed) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_speed) then
                         self:onSpeed()
                         return true
                     end
                     if self._mini_settings
-                        and self:_isTapOnWidget(ges.pos, self._mini_settings) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_settings) then
                         self:onTtsSettings()
                         return true
                     end
                     -- Tap on the refocus button?
                     if self._mini_refocus
-                        and self:_isTapOnWidget(ges.pos, self._mini_refocus) then
+                        and self:_isTapOnMiniButton(ges.pos, self._mini_refocus) then
                         logger.warn("ABP: refocus button tapped")
                         if self._mini_refocus.callback then
                             logger.warn("ABP: invoking refocus callback")
@@ -2229,6 +2166,16 @@ function AudiobookPlayer:_isTapOnWidget(pos, widget)
     local d = widget.dimen
     return pos.x >= d.x and pos.x <= d.x + d.w
         and pos.y >= d.y and pos.y <= d.y + d.h
+end
+
+--- Mini bar buttons answer to their whole column: the caller has already
+--- checked the tap is on the bar, so any x within the button (plus half the
+--- gap beside it) counts, even when the finger lands above or below it.
+function AudiobookPlayer:_isTapOnMiniButton(pos, widget)
+    if not widget or not widget.dimen then return false end
+    local d = widget.dimen
+    local slop = self._mini_hit_slop or 0
+    return pos.x >= d.x - slop and pos.x <= d.x + d.w + slop
 end
 
 function AudiobookPlayer:_doRebuild(new_w, new_h)
