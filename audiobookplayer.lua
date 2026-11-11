@@ -41,9 +41,6 @@ local logger = require("logger")
 local _ = require("audiobook_gettext")
 local T = require("ffi/util").template
 
--- Read-along sync nudges are written this long after the last tap.
-local SYNC_COMMIT_DELAY = 1.0
-
 local AudiobookPlayer = InputContainer:extend{
     plugin = nil,
     is_playing = true,
@@ -673,26 +670,17 @@ function AudiobookPlayer:setupUI()
         self._mini_settings = miniButton("⚙", 22, function() self:onTtsSettings() end)
         right_buttons = { self._mini_speed, self._mini_settings }
     elseif self.on_sync_nudge then
-        -- Taps only update the overlay; the setting is written once the
-        -- taps stop (_commitSyncNudge), because each write flushes the whole
-        -- reader settings file and made rapid taps lag by seconds.
+        -- Each tap changes the offset in memory only, so the highlight moves
+        -- at once.  Going through plugin:setSetting flushed the whole reader
+        -- settings file on every tap, which froze the UI for seconds; KOReader
+        -- writes the settings itself on suspend and exit.
         local function nudge(delta_ms)
-            if self._sync_pending_base == nil then
-                local p = self.plugin
-                self._sync_pending_base = (p and p.getSetting
-                    and p:getSetting("smil_sync_offset_ms", 0)) or 0
-                self._sync_pending_delta = 0
-            end
-            self._sync_pending_delta = self._sync_pending_delta + delta_ms
-            local v = self._sync_pending_base + self._sync_pending_delta
-            logger.warn("ABP: sync nudge", delta_ms, "->", v)
+            local settings = G_reader_settings:readSetting("audiobook_settings") or {}
+            local v = (settings.smil_sync_offset_ms or 0) + delta_ms
+            settings.smil_sync_offset_ms = v
+            G_reader_settings:saveSetting("audiobook_settings", settings)
             local ok, err = pcall(self._showSyncOverlay, self, v)
             if not ok then logger.err("ABP: sync overlay failed:", err) end
-            if self._sync_commit_timer then
-                UIManager:unschedule(self._sync_commit_timer)
-            end
-            self._sync_commit_timer = function() self:_commitSyncNudge() end
-            UIManager:scheduleIn(SYNC_COMMIT_DELAY, self._sync_commit_timer)
         end
         self._mini_sync_minus = miniButton("−", 22, function() nudge(-100) end)
         self._mini_sync_plus = miniButton("+", 22, function() nudge(100) end)
@@ -1821,7 +1809,6 @@ function AudiobookPlayer:hide()
     -- Stop the TTS context cycler so it does not keep a timer alive (and
     -- touch a widget that is being torn down).
     self._tts_info_active = false
-    self:_commitSyncNudge()
     self:_closeSyncOverlay()
     UIManager:close(self)
     UIManager:setDirty("all", "full")
@@ -2303,7 +2290,6 @@ function AudiobookPlayer:onCloseWidget()
         UIManager:close(self._speed_dialog)
         self._speed_dialog = nil
     end
-    self:_commitSyncNudge()
     self:_closeSyncOverlay()
 end
 
@@ -2352,19 +2338,6 @@ function AudiobookPlayer:_showSyncOverlay(offset_ms)
     end
     self._sync_overlay_timer = function() self:_closeSyncOverlay() end
     UIManager:scheduleIn(SYNC_OVERLAY_SECONDS, self._sync_overlay_timer)
-end
-
-function AudiobookPlayer:_commitSyncNudge()
-    if self._sync_commit_timer then
-        UIManager:unschedule(self._sync_commit_timer)
-        self._sync_commit_timer = nil
-    end
-    local delta = self._sync_pending_delta or 0
-    self._sync_pending_base = nil
-    self._sync_pending_delta = nil
-    if delta ~= 0 and self.on_sync_nudge then
-        self.on_sync_nudge(delta)
-    end
 end
 
 function AudiobookPlayer:_closeSyncOverlay()
