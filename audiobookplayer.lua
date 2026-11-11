@@ -680,7 +680,7 @@ function AudiobookPlayer:setupUI()
     local n_gaps = n_buttons + 4 -- between items, around the title and separator
     local mini_btn_size = math.min(
         inner_h - Screen:scaleBySize(8),
-        math.floor((self.width * 0.88 - gap * n_gaps) / (n_buttons + play_ratio)))
+        math.floor((self.width * 0.84 - gap * n_gaps) / (n_buttons + play_ratio)))
     local play_w = math.floor(mini_btn_size * play_ratio)
 
     local function miniButton(text, font_size, callback)
@@ -782,7 +782,7 @@ function AudiobookPlayer:setupUI()
     else
         self._mini_time = TextWidget:new{
             text = self.current_time_str or "",
-            face = Font:getFace("cfont", 13),
+            face = Font:getFace("cfont", 12),
             max_width = center_max_width,
         }
         mini_center = VerticalGroup:new{
