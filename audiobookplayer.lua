@@ -698,7 +698,9 @@ function AudiobookPlayer:setupUI()
     self._mini_play_pause = Button:new{
         text = self.is_playing and "⏸" or "▶",
         width = play_w,
-        height = mini_btn_size,
+        -- Button draws its border and padding outside this height; take them
+        -- off so the outline keeps clear of the bar's edges.
+        height = mini_btn_size - (Size.border.thick + Size.padding.button) * 2,
         text_font_size = 26,
         callback = function() self:onPlayPause() end,
         bordersize = Size.border.thick,
