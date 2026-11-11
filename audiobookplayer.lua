@@ -41,6 +41,9 @@ local logger = require("logger")
 local _ = require("audiobook_gettext")
 local T = require("ffi/util").template
 
+-- Read-along sync nudges are written this long after the last tap.
+local SYNC_COMMIT_DELAY = 1.0
+
 local AudiobookPlayer = InputContainer:extend{
     plugin = nil,
     is_playing = true,
@@ -619,7 +622,7 @@ function AudiobookPlayer:setupUI()
     local n_gaps = n_buttons + 4 -- between items, around the title and separator
     local mini_btn_size = math.min(
         inner_h - Screen:scaleBySize(8),
-        math.floor((self.width * 0.75 - gap * n_gaps) / (n_buttons + play_ratio)))
+        math.floor((self.width * 0.88 - gap * n_gaps) / (n_buttons + play_ratio)))
     local play_w = math.floor(mini_btn_size * play_ratio)
 
     local function miniButton(text, font_size, callback)
@@ -670,15 +673,26 @@ function AudiobookPlayer:setupUI()
         self._mini_settings = miniButton("⚙", 22, function() self:onTtsSettings() end)
         right_buttons = { self._mini_speed, self._mini_settings }
     elseif self.on_sync_nudge then
+        -- Taps only update the overlay; the setting is written once the
+        -- taps stop (_commitSyncNudge), because each write flushes the whole
+        -- reader settings file and made rapid taps lag by seconds.
         local function nudge(delta_ms)
-            local v = self.on_sync_nudge(delta_ms)
-            if v then
-                self._mini_time:setText(string.format("sync %+.1f s", v / 1000))
-                UIManager:setDirty(self, function()
-                    return "ui", self._minimized and self.dimen or nil
-                end)
-                self:_showSyncOverlay(v)
+            if self._sync_pending_base == nil then
+                local p = self.plugin
+                self._sync_pending_base = (p and p.getSetting
+                    and p:getSetting("smil_sync_offset_ms", 0)) or 0
+                self._sync_pending_delta = 0
             end
+            self._sync_pending_delta = self._sync_pending_delta + delta_ms
+            local v = self._sync_pending_base + self._sync_pending_delta
+            logger.warn("ABP: sync nudge", delta_ms, "->", v)
+            local ok, err = pcall(self._showSyncOverlay, self, v)
+            if not ok then logger.err("ABP: sync overlay failed:", err) end
+            if self._sync_commit_timer then
+                UIManager:unschedule(self._sync_commit_timer)
+            end
+            self._sync_commit_timer = function() self:_commitSyncNudge() end
+            UIManager:scheduleIn(SYNC_COMMIT_DELAY, self._sync_commit_timer)
         end
         self._mini_sync_minus = miniButton("−", 22, function() nudge(-100) end)
         self._mini_sync_plus = miniButton("+", 22, function() nudge(100) end)
@@ -1807,6 +1821,7 @@ function AudiobookPlayer:hide()
     -- Stop the TTS context cycler so it does not keep a timer alive (and
     -- touch a widget that is being torn down).
     self._tts_info_active = false
+    self:_commitSyncNudge()
     self:_closeSyncOverlay()
     UIManager:close(self)
     UIManager:setDirty("all", "full")
@@ -1887,7 +1902,21 @@ function AudiobookPlayer:handleEvent(event)
                 local mini_y = self:_miniBarY()
                 local on_bar = ges.pos.y >= mini_y
                     and ges.pos.y < mini_y + self._mini_height
-                    if on_bar and ges.ges == "tap" then
+                -- With double tap enabled in the reader, two quick taps arrive
+                -- as one double_tap; count it as two presses of a sync
+                -- button and as one press of anything else, never as a
+                -- gesture for the book underneath.
+                local is_double = ges.ges == "double_tap"
+                if on_bar and is_double then
+                    for _i, b in ipairs{ self._mini_sync_minus, self._mini_sync_plus } do
+                        if self:_isTapOnMiniButton(ges.pos, b) then
+                            b.callback()
+                            b.callback()
+                            return true
+                        end
+                    end
+                end
+                if on_bar and (ges.ges == "tap" or is_double) then
                     -- Tap on play/pause button?
                     if self:_isTapOnMiniButton(ges.pos, self._mini_play_pause) then
                         self:onPlayPause()
@@ -2274,6 +2303,7 @@ function AudiobookPlayer:onCloseWidget()
         UIManager:close(self._speed_dialog)
         self._speed_dialog = nil
     end
+    self:_commitSyncNudge()
     self:_closeSyncOverlay()
 end
 
@@ -2288,7 +2318,7 @@ function AudiobookPlayer:_showSyncOverlay(offset_ms)
     if self._sync_overlay then
         self._sync_overlay_text:setText(text)
         UIManager:setDirty(self._sync_overlay, function()
-            return "ui", self._sync_overlay_rect
+            return "fast", self._sync_overlay_rect
         end)
     else
         local face = Font:getFace("cfont", 22)
@@ -2314,13 +2344,27 @@ function AudiobookPlayer:_showSyncOverlay(offset_ms)
         local y = math.max(0, self:_miniBarY() - size.h - Screen:scaleBySize(12))
         self._sync_overlay = frame
         self._sync_overlay_rect = Geom:new{ x = x, y = y, w = size.w, h = size.h }
-        UIManager:show(frame, "ui", self._sync_overlay_rect, x, y)
+        logger.warn("ABP: sync overlay shown at", x, y, size.w, size.h)
+        UIManager:show(frame, "fast", self._sync_overlay_rect, x, y)
     end
     if self._sync_overlay_timer then
         UIManager:unschedule(self._sync_overlay_timer)
     end
     self._sync_overlay_timer = function() self:_closeSyncOverlay() end
     UIManager:scheduleIn(SYNC_OVERLAY_SECONDS, self._sync_overlay_timer)
+end
+
+function AudiobookPlayer:_commitSyncNudge()
+    if self._sync_commit_timer then
+        UIManager:unschedule(self._sync_commit_timer)
+        self._sync_commit_timer = nil
+    end
+    local delta = self._sync_pending_delta or 0
+    self._sync_pending_base = nil
+    self._sync_pending_delta = nil
+    if delta ~= 0 and self.on_sync_nudge then
+        self.on_sync_nudge(delta)
+    end
 end
 
 function AudiobookPlayer:_closeSyncOverlay()
