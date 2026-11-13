@@ -661,11 +661,24 @@ function BTManager:powerOn()
     -- fails and the repeated recovery attempts can corrupt flash storage.
     -- Check early so we can show a clear error before any damage occurs.
     if bt_stack == "mtk" then
-        local fw_found = self:_checkMtkFirmware()
-        if not fw_found then
-            logger.err("BTManager: MTK firmware file not found — need to boot into Nickel first")
-            self:_showFirmwareError()
-            return false
+        -- Ask Kobo's own Bluetooth service to bring the chip up first, the
+        -- way Nickel and KOReader's Kobo plugin do. Without this step the
+        -- Powered write below has nothing to power. On firmware where it
+        -- works, the bt_fw_fatures file is not needed (a Clara BW never
+        -- has one and powers up fine), so only fall back to the file check
+        -- when the service refuses.
+        local out, on_ok = dbus(dbus_cmd("/", "com.kobo.bluetooth.BluedroidManager1.On", 15000))
+        if on_ok then
+            logger.warn("BTManager: MTK BluedroidManager1.On ok")
+        else
+            logger.warn("BTManager: MTK BluedroidManager1.On failed:",
+                (out or ""):match("Error[^\n]*") or out)
+            local fw_found = self:_checkMtkFirmware()
+            if not fw_found then
+                logger.err("BTManager: MTK firmware file not found — need to boot into Nickel first")
+                self:_showFirmwareError()
+                return false
+            end
         end
     end
 
