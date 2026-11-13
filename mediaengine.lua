@@ -2411,7 +2411,7 @@ function MediaEngine:_spawnAudiooutFeeder(offset, filter_chain, wav_out)
     local cmd = string.format(
         '%s -ss %s -i "%s" %s -f s16le -ar 44100 -ac 2 - %s > "%s" 2>> "%s" & echo $!',
         ffmpeg, tostring(offset or 0), self.current_path, filter_arg,
-        wav_out or "", ao:fifoPath(), log)
+        wav_out or "", ao.feederFifoPath and ao:feederFifoPath() or ao:fifoPath(), log)
     local pid_f = io.popen(cmd)
     local pid = pid_f and tonumber(pid_f:read("*l") or "")
     if pid_f then pid_f:close() end
@@ -3050,14 +3050,29 @@ function MediaEngine:pause()
         self:_killAudiooutFeeder()
         self._audioout_client:pause()
         if self._use_persistent_pipeline then
-            -- MTK sink: a paused daemon cannot restart its stream (the resume
-            -- rebuild never reaches PLAYING, so resume is silent). Release the
-            -- daemon and the sink; resume() starts a fresh daemon here.
-            self._audioout_client:killDaemon()
-            self._audioout_external = false
-            self._audioout_ext_dec = nil
-            self._audioout_released_on_pause = true
-            logger.warn("MediaEngine: paused audioout: daemon released at", self._paused_position)
+            local ao = self._audioout_client
+            if ao.isSoft and ao:isSoft() then
+                -- Soft daemon: it feeds silence while paused, so the sink
+                -- and the headset link stay up and resume is instant. Only
+                -- a long pause gives the link back (battery, standby).
+                local gen = self.play_generation
+                local hold = self.PAUSE_LINK_HOLD_S or 180
+                self._pause_release_token = (self._pause_release_token or 0) + 1
+                local token = self._pause_release_token
+                UIManager:scheduleIn(hold, function()
+                    if self._pause_release_token == token
+                            and self.play_generation == gen then
+                        self:releasePausedOutput("long pause")
+                    end
+                end)
+                logger.warn("MediaEngine: paused audioout (link held) at", self._paused_position)
+                return
+            end
+            -- MTK sink, old daemon: a paused daemon cannot restart its
+            -- stream (the resume rebuild never reaches PLAYING, so resume is
+            -- silent). Release the daemon and the sink; resume() starts a
+            -- fresh daemon here.
+            self:releasePausedOutput("pause")
             return
         end
         logger.warn("MediaEngine: paused audioout external stream")
@@ -3131,8 +3146,26 @@ function MediaEngine:pause()
     end
 end
 
+--- While paused on the MTK path: give the sink and the Bluetooth link back
+--- (daemon killed). resume() then starts a fresh daemon at the paused
+--- position. Called for long pauses and before the device suspends.
+function MediaEngine:releasePausedOutput(reason)
+    if not (self.is_playing and self.is_paused) then return end
+    if not (self._use_persistent_pipeline and self._audioout_external
+            and self._audioout_client) then return end
+    self._pause_release_token = (self._pause_release_token or 0) + 1
+    self:_killAudiooutFeeder()
+    self._audioout_client:killDaemon()
+    self._audioout_external = false
+    self._audioout_ext_dec = nil
+    self._audioout_released_on_pause = true
+    logger.warn("MediaEngine: paused audioout: daemon released at",
+        self._paused_position, "reason=", reason)
+end
+
 function MediaEngine:resume()
     if not self.is_playing or not self.is_paused then return end
+    self._pause_release_token = (self._pause_release_token or 0) + 1
 
     if self._audioout_released_on_pause then
         self._audioout_released_on_pause = nil
@@ -3299,11 +3332,15 @@ function MediaEngine:stop()
     if self._audioout_external then
         self:_killAudiooutFeeder()
         if self._audioout_client then
-            self._audioout_client:stop()
             -- MTK: a stopped daemon does not answer the next externalStart
             -- (9 s stall, then respawn). Release it so every start is fresh.
+            -- Kill it straight away: a graceful "stop" first made the UI
+            -- wait for the sink teardown it was about to kill anyway (the
+            -- long-pause release has always killed without it).
             if self._use_persistent_pipeline then
                 self._audioout_client:killDaemon()
+            else
+                self._audioout_client:stop()
             end
         end
         self._audioout_external = false
@@ -3543,7 +3580,12 @@ function MediaEngine:seek(seconds, mode)
                     just_started = true
                 end
             end
-            if was_playing and (near_current or (near_start and just_started)) then
+            -- A volume or speed change seeks to where it already is on
+            -- purpose: the restart is what applies the new filter.
+            local forced = self._force_restart_seek
+            self._force_restart_seek = nil
+            if was_playing and not forced
+                    and (near_current or (near_start and just_started)) then
                 logger.warn("MediaEngine: skip no-op seek-by-restart",
                     "req=", seconds, "target=", target,
                     "current=", current, "seek_offset=", started_at)
@@ -3900,7 +3942,9 @@ function MediaEngine:setSpeed(speed)
     -- so they never hit disk.
     if self.plugin and self.plugin.setSetting
             and math.abs(speed - old_speed) >= 0.01 then
-        self.plugin:setSetting("playback_speed", speed)
+        -- Flushed a moment later, not inside the tap (a flush blocks).
+        self.plugin:setSetting("playback_speed", speed, true)
+        if self.plugin._flushSettingsSoon then self.plugin:_flushSettingsSoon() end
     end
 
     if self.backend == self.BACKENDS.ANDROID then
@@ -3944,7 +3988,9 @@ function MediaEngine:setSpeed(speed)
             local pos = (self:getPosition() or 0) - (self.position_latency_s or 0)
             logger.warn("MediaEngine: restarting pipeline for speed change",
                 old_speed, "->", speed, "at pos", pos)
+            self._force_restart_seek = true
             self:seek(math.max(0, pos), "absolute")
+            self._force_restart_seek = nil
         end
     end
     -- aplay / wav-play / Kindle LIPC do not support speed control
@@ -4009,7 +4055,10 @@ function MediaEngine:setVolume(pct)
         -- skip the audio still in flight (~2.7 s jump forward every change).
         if not self.is_paused then
             local pos = (self:getPosition() or 0) - (self.position_latency_s or 0)
+            self._force_restart_seek = true
+            logger.warn("MediaEngine: volume", pct, "% -> restart at", pos)
             self:seek(math.max(0, pos), "absolute")
+            self._force_restart_seek = nil
         end
     end
 end

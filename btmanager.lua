@@ -661,11 +661,24 @@ function BTManager:powerOn()
     -- fails and the repeated recovery attempts can corrupt flash storage.
     -- Check early so we can show a clear error before any damage occurs.
     if bt_stack == "mtk" then
-        local fw_found = self:_checkMtkFirmware()
-        if not fw_found then
-            logger.err("BTManager: MTK firmware file not found — need to boot into Nickel first")
-            self:_showFirmwareError()
-            return false
+        -- Ask Kobo's own Bluetooth service to bring the chip up first, the
+        -- way Nickel and KOReader's Kobo plugin do. Without this step the
+        -- Powered write below has nothing to power. On firmware where it
+        -- works, the bt_fw_fatures file is not needed (a Clara BW never
+        -- has one and powers up fine), so only fall back to the file check
+        -- when the service refuses.
+        local out, on_ok = dbus(dbus_cmd("/", "com.kobo.bluetooth.BluedroidManager1.On", 15000))
+        if on_ok then
+            logger.warn("BTManager: MTK BluedroidManager1.On ok")
+        else
+            logger.warn("BTManager: MTK BluedroidManager1.On failed:",
+                (out or ""):match("Error[^\n]*") or out)
+            local fw_found = self:_checkMtkFirmware()
+            if not fw_found then
+                logger.err("BTManager: MTK firmware file not found — need to boot into Nickel first")
+                self:_showFirmwareError()
+                return false
+            end
         end
     end
 
@@ -1853,6 +1866,42 @@ end
 -- @string address  MAC address
 -- @treturn bool success
 -- @treturn string error message (if any)
+--- Whether the stack currently has an object for this device path.
+function BTManager:_deviceObjectExists(path)
+    local out = get_property(path, DEVICE_IFACE, "Address") or ""
+    return out:match('string "') ~= nil
+end
+
+--- Whether the stack knows this device right now (by MAC address). On MTK
+--- a disconnected device has no object until a scan sees it again.
+function BTManager:deviceKnown(address)
+    if bt_stack == "kindle" then return true end
+    return self:_deviceObjectExists(mac_to_path(address))
+end
+
+--- Scan until the device's object reappears, for at most timeout_s seconds.
+--- Discovery is always stopped again: it disturbs A2DP while running.
+-- @treturn bool true when the object is back
+function BTManager:_rediscoverDevice(path, timeout_s)
+    local was_discovering = self:isDiscovering()
+    if not was_discovering then self:startDiscovery() end
+    logger.warn("BTManager: device object gone, scanning for it (up to", timeout_s, "s)")
+    local found = false
+    for i = 1, timeout_s * 2 do
+        os.execute("sleep 0.5")
+        if self:_deviceObjectExists(path) then
+            logger.warn("BTManager: device seen again after", i * 0.5, "s of scanning")
+            found = true
+            break
+        end
+    end
+    if not was_discovering then self:stopDiscovery() end
+    if not found then
+        logger.warn("BTManager: device not seen while scanning")
+    end
+    return found
+end
+
 function BTManager:connect(address)
     self:clearAudioDeviceCache()
     detectStack()
@@ -1892,6 +1941,14 @@ function BTManager:connect(address)
             self:ensureBluealsa()
         end
         return true
+    end
+
+    -- The MTK stack drops a device's object once it disconnects (AirPods
+    -- back in the case), so Connect fails with UnknownObject until a scan
+    -- sees the device again. KOReader's own Kobo plugin reconnects the same
+    -- way: discover, then Connect.
+    if not self:_deviceObjectExists(path) then
+        self:_rediscoverDevice(path, 12)
     end
 
     -- Use a longer timeout (15s) for Connect -- BT negotiation can be slow,

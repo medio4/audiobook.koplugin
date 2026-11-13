@@ -83,6 +83,11 @@ local AudiobookPlayer = InputContainer:extend{
     show_loop = false,
     loop_active = false,
     on_volume = nil,
+    -- on_skip_line(n): move n narrated lines (read-along only).
+    on_skip_line = nil,
+    -- on_skip_page(dir): hold on the line buttons; -1 top of this page
+    -- (or the previous one), +1 next page.
+    on_skip_page = nil,
     volume_pct = 100,
     on_sleep_timer_set = nil,
     on_sleep_timer_cancel = nil,
@@ -164,6 +169,73 @@ function AudiobookPlayer:_isEink()
     return Device.hasEinkScreen and Device:hasEinkScreen()
 end
 
+-- ── Icons ────────────────────────────────────────────────────────────
+-- The plugin ships its own SVG icons in <plugin>/icons/ab.<name>.svg (the
+-- font glyphs ⏸ ⏮ ♪ render thin and small on e-ink). KOReader's Button only
+-- takes an icon *name*, looked up under resources/icons/mdlight, so ours are
+-- named by a path relative to that directory. nil when the files cannot be
+-- reached that way; callers then fall back to the old text label.
+local _icon_prefix -- false once resolution failed
+function AudiobookPlayer:_iconName(name)
+    if _icon_prefix == nil then
+        _icon_prefix = false
+        local dir = self.plugin and self.plugin.path
+        if dir and dir:sub(1, 1) == "/" then
+            local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+            local cwd = ok_lfs and lfs.currentdir and lfs.currentdir()
+            if cwd and dir:sub(1, #cwd + 1) == cwd .. "/" then
+                dir = dir:sub(#cwd + 2)
+            else
+                dir = nil
+            end
+        end
+        if dir and dir ~= "" then
+            local probe = io.open(dir .. "/icons/ab.play.svg", "r")
+            if probe then
+                probe:close()
+                _icon_prefix = "../../../" .. dir .. "/icons/ab."
+            end
+        end
+    end
+    return _icon_prefix and (_icon_prefix .. name) or nil
+end
+
+--- A button showing one of the plugin's icons (text fallback). opts:
+--- width (defaults to size), icon_ratio (icon size / button height),
+--- bordersize, radius, font_size (fallback text).
+function AudiobookPlayer:_iconButton(icon, fallback_text, size, callback, opts)
+    opts = opts or {}
+    local args = {
+        width = opts.width or size,
+        height = size,
+        callback = callback,
+        bordersize = opts.bordersize or 0,
+        radius = opts.radius,
+        show_parent = self,
+    }
+    local name = self:_iconName(icon)
+    if name then
+        local isz = math.floor(size * (opts.icon_ratio or 0.6))
+        args.icon = name
+        args.icon_width = isz
+        args.icon_height = isz
+    else
+        args.text = fallback_text
+        args.text_font_size = opts.font_size or 22
+    end
+    return Button:new(args)
+end
+
+--- Show play or pause on a play/pause button, icon or text.
+function AudiobookPlayer:_refreshPlayButton(btn)
+    if not btn then return end
+    if btn.icon then
+        btn:setIcon(self:_iconName(self.is_playing and "pause" or "play"), btn.width)
+    else
+        btn:setText(self.is_playing and "⏸" or "▶", btn.width)
+    end
+end
+
 --- Sit above KOReader's footer when the user asked to keep it, or when the
 --- footer is a real page chrome (Overlap status bar off). Otherwise the mini
 --- player paints on top of the progress bar and e-ink ghosts a second bar.
@@ -190,64 +262,40 @@ function AudiobookPlayer:init()
 end
 
 function AudiobookPlayer:setupUI()
-    local button_size = Screen:scaleBySize(56)
+    -- Sized for fingers on e-ink: the transport buttons were 56, which was
+    -- easy to miss; the top row stays a little smaller to fit the title.
+    local button_size = Screen:scaleBySize(68)
+    local top_size = Screen:scaleBySize(60)
     local spacing = Size.padding.large
 
     -- ── Top row: chapter list | title | speed | minimize | close ──
-    self.chapter_list_button = Button:new{
-        text = "☰",
-        width = button_size,
-        height = button_size,
-        text_font_size = 20,
-        callback = function() self:onChapterList() end,
-        bordersize = 0,
-        show_parent = self,
-    }
+    self.chapter_list_button = self:_iconButton("chapters", "☰", top_size,
+        function() self:onChapterList() end)
 
-    self.sleep_timer_button = Button:new{
-        text = "⏲",
-        width = button_size,
-        height = button_size,
-        text_font_size = 20,
-        callback = function() self:onSleepTimer() end,
-        bordersize = 0,
-        show_parent = self,
-    }
+    self.sleep_timer_button = self:_iconButton("timer", "⏲", top_size,
+        function() self:onSleepTimer() end)
 
     self.speed_button = Button:new{
         text = self:_speedText(),
-        width = button_size,
-        height = button_size,
-        text_font_size = 14,
+        width = top_size,
+        height = top_size,
+        text_font_size = 18,
+        text_font_bold = true,
         callback = function() self:onSpeed() end,
         bordersize = 0,
         show_parent = self,
     }
 
-    self.minimize_button = Button:new{
-        text = "▼",
-        width = button_size,
-        height = button_size,
-        text_font_size = 20,
-        callback = function() self:onMinimize() end,
-        bordersize = 0,
-        show_parent = self,
-    }
+    self.minimize_button = self:_iconButton("minimize", "▼", top_size,
+        function() self:onMinimize() end)
 
-    self.close_button = Button:new{
-        text = "✕",
-        width = button_size,
-        height = button_size,
-        text_font_size = 22,
-        callback = function() self:onClose() end,
-        bordersize = 0,
-        show_parent = self,
-    }
+    self.close_button = self:_iconButton("close", "✕", top_size,
+        function() self:onClose() end, { icon_ratio = 0.5 })
 
     self.shuffle_button = Button:new{
         text = "⇄",
-        width = button_size,
-        height = button_size,
+        width = top_size,
+        height = top_size,
         text_font_size = 20,
         callback = function() self:onShuffle() end,
         bordersize = self.shuffle_active and Size.border.default or 0,
@@ -257,8 +305,8 @@ function AudiobookPlayer:setupUI()
 
     self.loop_button = Button:new{
         text = "⟳",
-        width = button_size,
-        height = button_size,
+        width = top_size,
+        height = top_size,
         text_font_size = 20,
         callback = function() self:onLoop() end,
         bordersize = self.loop_active and Size.border.default or 0,
@@ -269,8 +317,8 @@ function AudiobookPlayer:setupUI()
     -- Kindle AirPods: reconnect A2DP when the stream goes silent mid-play.
     self.fix_audio_button = Button:new{
         text = _("BT"),
-        width = button_size,
-        height = button_size,
+        width = top_size,
+        height = top_size,
         text_font_size = 14,
         callback = function() self:onFixAudio() end,
         bordersize = 0,
@@ -286,7 +334,7 @@ function AudiobookPlayer:setupUI()
     self.title_widget = TextWidget:new{
         text = self.title or _("Audiobook"),
         face = Font:getFace("cfont", 18),
-        max_width = self.width - button_size * visible_buttons - spacing * visible_buttons,
+        max_width = self.width - top_size * visible_buttons - spacing * visible_buttons,
         truncate_left = true,
     }
 
@@ -311,7 +359,7 @@ function AudiobookPlayer:setupUI()
         table.insert(top_row_items, HorizontalSpan:new{ width = math.floor(spacing / 2) })
     end
     table.insert(top_row_items, CenterContainer:new{
-        dimen = Geom:new{ w = self.title_widget:getSize().w, h = button_size },
+        dimen = Geom:new{ w = self.title_widget:getSize().w, h = top_size },
         self.title_widget,
     })
     table.insert(top_row_items, HorizontalSpan:new{ width = spacing })
@@ -320,8 +368,8 @@ function AudiobookPlayer:setupUI()
     if self.tts_mode then
         self.settings_button = Button:new{
             text = "⚙",
-            width = button_size,
-            height = button_size,
+            width = top_size,
+            height = top_size,
             text_font_size = 20,
             callback = function() self:onTtsSettings() end,
             bordersize = 0,
@@ -358,7 +406,8 @@ function AudiobookPlayer:setupUI()
         local is_wide = self.width > self.height
         self._cover_width = self.width - spacing * 4
         -- Portrait also carries the sync row, so leave it room.
-        self._cover_height = is_wide and max_cover_h or math.floor(self.height * 0.38)
+        -- (0.38 before the controls grew; they need the room now.)
+        self._cover_height = is_wide and max_cover_h or math.floor(self.height * 0.33)
         self.cover_frame = self:_buildLinesFrame()
     else
         self._line_slots = nil
@@ -401,87 +450,64 @@ function AudiobookPlayer:setupUI()
     self._scrubber_dragging = false
     self._scrubber_drag_pct = nil
 
-    -- ── Playback controls: all same size ──
-    self.skip_back_button = Button:new{
-        text = "⏴30",
-        width = button_size,
-        height = button_size,
-        text_font_size = 13,
-        callback = function() self:onSkipBack() end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
+    -- ── Playback controls ──
+    -- Outlined, icon-labelled; play/pause is the widest so it is the
+    -- easiest to hit.  The 30 s skips keep a text label ("−30" / "+30"):
+    -- the number is the whole message.
+    local outline = { bordersize = Size.border.thin, radius = Screen:scaleBySize(8) }
+    local function outlined(extra)
+        local o = { bordersize = outline.bordersize, radius = outline.radius }
+        for k, v in pairs(extra or {}) do o[k] = v end
+        return o
+    end
+    local function textButton(text, callback)
+        return Button:new{
+            text = text,
+            width = button_size,
+            height = button_size,
+            text_font_size = 20,
+            text_font_bold = true,
+            callback = callback,
+            bordersize = outline.bordersize,
+            radius = outline.radius,
+            show_parent = self,
+        }
+    end
 
-    self.prev_chapter_button = Button:new{
-        text = "⏮",
-        width = button_size,
-        height = button_size,
-        text_font_size = 18,
-        callback = function() self:onPrevChapter() end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
+    self.skip_back_button = textButton("−30", function() self:onSkipBack() end)
+    self.skip_forward_button = textButton("+30", function() self:onSkipForward() end)
 
-    self.play_pause_button = Button:new{
-        text = self.is_playing and "⏸" or "▶",
-        width = button_size,
-        height = button_size,
-        text_font_size = 28,
-        callback = function() self:onPlayPause() end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
+    self.prev_chapter_button = self:_iconButton("chapter.prev", "⏮", button_size,
+        function() self:onPrevChapter() end, outlined())
+    self.next_chapter_button = self:_iconButton("chapter.next", "⏭", button_size,
+        function() self:onNextChapter() end, outlined())
 
-    self.next_chapter_button = Button:new{
-        text = "⏭",
-        width = button_size,
-        height = button_size,
-        text_font_size = 18,
-        callback = function() self:onNextChapter() end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
+    self.play_pause_button = self:_iconButton(self.is_playing and "pause" or "play",
+        self.is_playing and "⏸" or "▶", button_size,
+        function() self:onPlayPause() end,
+        outlined{ width = math.floor(button_size * 1.4), icon_ratio = 0.7,
+            bordersize = Size.border.thick, font_size = 30 })
 
-    self.skip_forward_button = Button:new{
-        text = "30⏵",
-        width = button_size,
-        height = button_size,
-        text_font_size = 13,
-        callback = function() self:onSkipForward() end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
+    -- Line skip: one narrated sentence per tap (read-along only).
+    if self.on_skip_line then
+        self.line_back_button = self:_iconButton("line.back", "◂≡", button_size,
+            function() self.on_skip_line(-1) end, outlined())
+        self.line_forward_button = self:_iconButton("line.forward", "≡▸", button_size,
+            function() self.on_skip_line(1) end, outlined())
+    else
+        self.line_back_button, self.line_forward_button = nil, nil
+    end
 
     -- ── Volume controls (used in both orientations) ──
     self.volume_widget = TextWidget:new{
         text = self:_volumeText(),
-        face = Font:getFace("cfont", 16),
+        face = Font:getFace("cfont", 20),
+        bold = true,
     }
-    self.vol_minus_button = Button:new{
-        text = "−",
-        width = button_size,
-        height = button_size,
-        text_font_size = 24,
-        callback = function() self:_applyVolume(-10) end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
-    self.vol_plus_button = Button:new{
-        text = "+",
-        width = button_size,
-        height = button_size,
-        text_font_size = 24,
-        callback = function() self:_applyVolume(10) end,
-        bordersize = Size.border.thin,
-        radius = Screen:scaleBySize(6),
-        show_parent = self,
-    }
+    self.vol_minus_button = self:_iconButton("volume.down", "−", button_size,
+        function() self:_applyVolume(-10) end, outlined())
+    self.vol_plus_button = self:_iconButton("volume.up", "+", button_size,
+        function() self:_applyVolume(10) end, outlined())
 
     local is_landscape = self.width > self.height
     -- Line-by-line view: sync adjusters, same job as the mini bar's − / +.
@@ -494,8 +520,8 @@ function AudiobookPlayer:setupUI()
         local function syncButton(text, delta)
             return Button:new{
                 text = text,
-                width = button_size,
-                height = button_size,
+                width = top_size,
+                height = top_size,
                 text_font_size = 24,
                 callback = function() self:_nudgeSync(delta) end,
                 bordersize = Size.border.thin,
@@ -506,7 +532,7 @@ function AudiobookPlayer:setupUI()
         self.sync_minus_button = syncButton("−", -100)
         self.sync_plus_button = syncButton("+", 100)
         self._sync_label_box = CenterContainer:new{
-            dimen = Geom:new{ w = button_size * 3, h = button_size },
+            dimen = Geom:new{ w = top_size * 3, h = top_size },
             self.sync_widget,
         }
         sync_row = HorizontalGroup:new{
@@ -528,9 +554,12 @@ function AudiobookPlayer:setupUI()
         -- Transport/volume buttons are centered on the full screen width;
         -- the percentage label sits at the right edge and does not shift the center.
         local inner_span = math.floor(spacing / 2)
-        local button_group_w = button_size * 7
+        local button_group_w = button_size * 6 + self.play_pause_button.width
             + inner_span * 2
             + spacing * 6
+        -- Read-along: the line skips take the chapter buttons' places.
+        local left_nav = self.line_back_button or self.prev_chapter_button
+        local right_nav = self.line_forward_button or self.next_chapter_button
         local vol_w = self.volume_widget:getSize().w
         local right_span = spacing
         local left_span = math.max(0, math.floor((self.width - button_group_w) / 2))
@@ -542,11 +571,11 @@ function AudiobookPlayer:setupUI()
             HorizontalSpan:new{ width = inner_span },
             self.skip_back_button,
             HorizontalSpan:new{ width = spacing },
-            self.prev_chapter_button,
+            left_nav,
             HorizontalSpan:new{ width = spacing * 2 },
             self.play_pause_button,
             HorizontalSpan:new{ width = spacing * 2 },
-            self.next_chapter_button,
+            right_nav,
             HorizontalSpan:new{ width = spacing },
             self.skip_forward_button,
             HorizontalSpan:new{ width = inner_span },
@@ -556,32 +585,33 @@ function AudiobookPlayer:setupUI()
             HorizontalSpan:new{ width = right_span },
         }
     else
-        -- Portrait: separate transport and volume rows
-        control_row = HorizontalGroup:new{
-            align = "center",
-            HorizontalSpan:new{ width = spacing },
-            self.skip_back_button,
-            HorizontalSpan:new{ width = spacing },
-            self.prev_chapter_button,
-            HorizontalSpan:new{ width = spacing * 2 },
-            self.play_pause_button,
-            HorizontalSpan:new{ width = spacing * 2 },
-            self.next_chapter_button,
-            HorizontalSpan:new{ width = spacing },
-            self.skip_forward_button,
-            HorizontalSpan:new{ width = spacing },
+        -- Portrait: transport row, then a second row.
+        -- With line skip:  [−30] [◂line] [ PLAY ] [line▸] [+30]
+        --                  [⏮] [vol−]  40%  [vol+] [⏭]
+        -- Without:         [−30] [⏮] [ PLAY ] [⏭] [+30] / [vol−] 40% [vol+]
+        local gap = spacing
+        local function row(items)
+            local t = { align = "center" }
+            for i, w in ipairs(items) do
+                if i > 1 then table.insert(t, HorizontalSpan:new{ width = gap }) end
+                table.insert(t, w)
+            end
+            return HorizontalGroup:new(t)
+        end
+        local vol_label = CenterContainer:new{
+            dimen = Geom:new{ w = math.floor(button_size * 1.6), h = button_size },
+            self.volume_widget,
         }
-        volume_row = HorizontalGroup:new{
-            align = "center",
-            self.vol_minus_button,
-            HorizontalSpan:new{ width = spacing * 2 },
-            CenterContainer:new{
-                dimen = Geom:new{ w = button_size * 2, h = button_size },
-                self.volume_widget,
-            },
-            HorizontalSpan:new{ width = spacing * 2 },
-            self.vol_plus_button,
-        }
+        if self.line_back_button then
+            control_row = row{ self.skip_back_button, self.line_back_button,
+                self.play_pause_button, self.line_forward_button, self.skip_forward_button }
+            volume_row = row{ self.prev_chapter_button, self.vol_minus_button,
+                vol_label, self.vol_plus_button, self.next_chapter_button }
+        else
+            control_row = row{ self.skip_back_button, self.prev_chapter_button,
+                self.play_pause_button, self.next_chapter_button, self.skip_forward_button }
+            volume_row = row{ self.vol_minus_button, vol_label, self.vol_plus_button }
+        end
     end
 
     -- ── Assemble full layout ──
@@ -1181,13 +1211,8 @@ function AudiobookPlayer:setPlaying(is_playing)
     -- Always push the icon/text even when the boolean is unchanged: on Boox
     -- the mini-bar dirty region sometimes misses the first toggle.
     self.is_playing = is_playing and true or false
-    local txt = self.is_playing and "⏸" or "▶"
-    if self.play_pause_button then
-        self.play_pause_button:setText(txt, self.play_pause_button.width)
-    end
-    if self._mini_play_pause then
-        self._mini_play_pause:setText(txt, self._mini_play_pause.width)
-    end
+    self:_refreshPlayButton(self.play_pause_button)
+    self:_refreshPlayButton(self._mini_play_pause)
     if self._minimized then
         self:_dirtyChrome(self._mini_play_pause and self._mini_play_pause.dimen)
     else
@@ -1589,90 +1614,121 @@ end
 --- single rule on top instead of a boxed frame.  Carries the same buttons
 --- as the classic bar and sets the same self._mini_* fields.
 function AudiobookPlayer:_buildLargeMiniBar()
-    self._mini_height = Screen:scaleBySize(64)
+    self._mini_height = Screen:scaleBySize(76)
     local rule_h = Size.line.thick
     local inner_h = self._mini_height - rule_h
     local gap = Size.padding.large
     self._mini_hit_slop = math.floor(gap / 2)
 
+    -- Read-along with line skip: the bar is for listening, so it carries
+    --   [◂line] [ PLAY ] [line▸]  title / time  [vol−] [vol+] [◎] | [✕]
+    -- Chapters live in the full player, and so do the sync nudges when the
+    -- line view (which has its own sync row) is on.
+    local line_skip = self.on_skip_line ~= nil and not self.tts_mode
+    local show_chapters = self.on_chapter_list and not line_skip
+    local show_sync = self.on_sync_nudge and not self.tts_mode
+        and not (line_skip and self.lines_mode)
+
     -- Count the buttons this bar will carry so they can shrink together on
     -- narrow screens instead of squeezing the title to nothing.
     local n_buttons = 1 -- close
     if self.on_refocus then n_buttons = n_buttons + 1 end
-    if self.on_chapter_list then n_buttons = n_buttons + 1 end
-    if self.tts_mode or self.on_sync_nudge then n_buttons = n_buttons + 2 end
+    if show_chapters then n_buttons = n_buttons + 1 end
+    if self.tts_mode or show_sync then n_buttons = n_buttons + 2 end
     if not self.tts_mode and self.on_volume then n_buttons = n_buttons + 2 end
+    if line_skip then n_buttons = n_buttons + 2 end
     local play_ratio = 1.5
     local n_gaps = n_buttons + 4 -- between items, around the title and separator
     local mini_btn_size = math.min(
-        inner_h - Screen:scaleBySize(8),
-        math.floor((self.width * 0.84 - gap * n_gaps) / (n_buttons + play_ratio)))
+        inner_h - Screen:scaleBySize(6),
+        math.floor((self.width * 0.86 - gap * n_gaps) / (n_buttons + play_ratio)))
     local play_w = math.floor(mini_btn_size * play_ratio)
 
-    local function miniButton(text, font_size, callback)
+    local function miniButton(icon, text, font_size, callback)
+        if icon then
+            return self:_iconButton(icon, text, mini_btn_size, callback,
+                { icon_ratio = 0.62, font_size = font_size })
+        end
         return Button:new{
             text = text,
             width = mini_btn_size,
             height = mini_btn_size,
             text_font_size = font_size,
+            text_font_bold = true,
             callback = callback,
             bordersize = 0,
             show_parent = self,
         }
     end
 
-    self._mini_play_pause = Button:new{
-        text = self.is_playing and "⏸" or "▶",
-        width = play_w,
-        -- Button draws its border and padding outside this height; take them
-        -- off so the outline keeps clear of the bar's edges.
-        height = mini_btn_size - (Size.border.thick + Size.padding.button) * 2,
-        text_font_size = 26,
-        callback = function() self:onPlayPause() end,
-        bordersize = Size.border.thick,
-        radius = Screen:scaleBySize(10),
-        show_parent = self,
-    }
+    -- Button draws its border and padding outside this height; take them
+    -- off so the outline keeps clear of the bar's edges.
+    local play_h = mini_btn_size - (Size.border.thick + Size.padding.button) * 2
+    self._mini_play_pause = self:_iconButton(self.is_playing and "pause" or "play",
+        self.is_playing and "⏸" or "▶", play_h,
+        function() self:onPlayPause() end,
+        { width = play_w, icon_ratio = 0.8, bordersize = Size.border.thick,
+          radius = Screen:scaleBySize(10), font_size = 26 })
 
-    self._mini_close = miniButton("✕", 20, function() self:onClose() end)
+    self._mini_close = miniButton("close", "✕", 20, function() self:onClose() end)
 
     if self.on_refocus then
-        self._mini_refocus = miniButton("○", 22, function() self:onRefocus() end)
+        self._mini_refocus = miniButton("locate", "○", 22, function() self:onRefocus() end)
     end
 
     -- Chapter list on the mini bar (overlay): avoids expanding the fullscreen
     -- player just to tap ☰, which was crashing on Boox.
-    if self.on_chapter_list then
-        self._mini_chapters = miniButton("☰", 22, function() self:onChapterList() end)
+    if show_chapters then
+        self._mini_chapters = miniButton("chapters", "☰", 22, function() self:onChapterList() end)
+    else
+        self._mini_chapters = nil
+    end
+
+    if line_skip then
+        self._mini_line_back = miniButton("line.back", "◂≡", 20,
+            function() self.on_skip_line(-1) end)
+        self._mini_line_forward = miniButton("line.forward", "≡▸", 20,
+            function() self.on_skip_line(1) end)
+    else
+        self._mini_line_back, self._mini_line_forward = nil, nil
     end
 
     -- Read-along: sync-offset nudges.  TTS: speed and the settings gear.
     local right_buttons = {}
     if self.tts_mode then
-        self._mini_speed = miniButton(self:_speedText(), 15, function() self:onSpeed() end)
-        self._mini_settings = miniButton("⚙", 22, function() self:onTtsSettings() end)
+        self._mini_speed = miniButton(nil, self:_speedText(), 16, function() self:onSpeed() end)
+        self._mini_settings = miniButton(nil, "⚙", 22, function() self:onTtsSettings() end)
         right_buttons = { self._mini_speed, self._mini_settings }
-    elseif self.on_sync_nudge then
-        self._mini_sync_minus = miniButton("−", 22, function() self:_nudgeSync(-100) end)
-        self._mini_sync_plus = miniButton("+", 22, function() self:_nudgeSync(100) end)
+    elseif show_sync then
+        self._mini_sync_minus = miniButton(nil, "−", 24, function() self:_nudgeSync(-100) end)
+        self._mini_sync_plus = miniButton(nil, "+", 24, function() self:_nudgeSync(100) end)
         right_buttons = { self._mini_sync_minus, self._mini_sync_plus }
-    end
-    if self._mini_refocus then
-        table.insert(right_buttons, self._mini_refocus)
+    else
+        self._mini_sync_minus, self._mini_sync_plus = nil, nil
     end
 
-    -- Volume nudge buttons (♪− / ♪+).  These belong to audiobook and music
-    -- playback; TTS reaches volume from its settings gear instead, so its
-    -- mini bar stays uncluttered.
-    local left_buttons = { self._mini_play_pause }
+    -- Volume nudge buttons.  These belong to audiobook and music playback;
+    -- TTS reaches volume from its settings gear instead, so its mini bar
+    -- stays uncluttered.  With line skip they sit on the right, away from
+    -- the transport cluster.
+    local left_buttons = {}
+    if line_skip then
+        left_buttons = { self._mini_line_back, self._mini_play_pause, self._mini_line_forward }
+    else
+        left_buttons = { self._mini_play_pause }
+    end
     if self._mini_chapters then
         table.insert(left_buttons, self._mini_chapters)
     end
     if not self.tts_mode and self.on_volume then
-        self._mini_vol_minus = miniButton("♪−", 17, function() self:_applyVolume(-10) end)
-        self._mini_vol_plus = miniButton("♪+", 17, function() self:_applyVolume(10) end)
-        table.insert(left_buttons, self._mini_vol_minus)
-        table.insert(left_buttons, self._mini_vol_plus)
+        self._mini_vol_minus = miniButton("volume.down", "♪−", 17, function() self:_applyVolume(-10) end)
+        self._mini_vol_plus = miniButton("volume.up", "♪+", 17, function() self:_applyVolume(10) end)
+        local vol_list = line_skip and right_buttons or left_buttons
+        table.insert(vol_list, self._mini_vol_minus)
+        table.insert(vol_list, self._mini_vol_plus)
+    end
+    if self._mini_refocus then
+        table.insert(right_buttons, self._mini_refocus)
     end
 
     -- Whatever width the buttons leave goes to the centered title stack.
@@ -1686,7 +1742,8 @@ function AudiobookPlayer:_buildLargeMiniBar()
     self._mini_title = TextWidget:new{
         text = (self.chapter_title and self.chapter_title ~= "" and self.chapter_title)
             or self.output_name or self.title or _("Audiobook"),
-        face = Font:getFace("cfont", 15),
+        face = Font:getFace("cfont", 17),
+        bold = true,
         max_width = center_max_width,
         truncate_left = false,
     }
@@ -1700,7 +1757,7 @@ function AudiobookPlayer:_buildLargeMiniBar()
     else
         self._mini_time = TextWidget:new{
             text = self.current_time_str or "",
-            face = Font:getFace("cfont", 12),
+            face = Font:getFace("cfont", 15),
             max_width = center_max_width,
         }
         mini_center = VerticalGroup:new{
@@ -1794,10 +1851,30 @@ end
 --- its slot is cut with an ellipsis rather than spilling into its neighbours.
 function AudiobookPlayer:_makeLineWidget(i, text)
     local spec = self._line_specs[i]
+    -- The line being narrated is never cut off: step the font down until the
+    -- whole sentence fits its slot. Only a sentence too long even at the
+    -- smallest size falls through to the ellipsis below.
+    if spec.shrink then
+        local size = spec.size
+        while size >= spec.min_size do
+            local w = TextBoxWidget:new{
+                text = text or "",
+                face = Font:getFace("cfont", size),
+                bold = spec.bold,
+                fgcolor = spec.color,
+                bgcolor = self:_getThemeBackground(),
+                width = self._cover_width,
+                alignment = "center",
+            }
+            if w:getSize().h <= spec.h then return w end
+            w:free()
+            size = size - 2
+        end
+    end
     local function build(height)
         return TextBoxWidget:new{
             text = text or "",
-            face = Font:getFace("cfont", spec.size),
+            face = Font:getFace("cfont", spec.min_size or spec.size),
             bold = spec.bold,
             fgcolor = spec.color,
             bgcolor = self:_getThemeBackground(),
@@ -1821,11 +1898,12 @@ end
 function AudiobookPlayer:_buildLinesFrame()
     local h = self._cover_height
     local gap = Size.padding.large
-    local side_h = math.floor(h * 0.22)
+    local side_h = math.floor(h * 0.2)
     self._line_specs = {
-        { size = 17, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
-        { size = 26, bold = true, color = Blitbuffer.COLOR_BLACK, h = h - side_h * 2 - gap * 2 },
-        { size = 17, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
+        { size = 18, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
+        { size = 28, min_size = 14, shrink = true, bold = true,
+          color = Blitbuffer.COLOR_BLACK, h = h - side_h * 2 - gap * 2 },
+        { size = 18, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
     }
     local lines = self._lines or {}
     self._line_slots = {}
@@ -1887,7 +1965,7 @@ function AudiobookPlayer:setCoverImage(path)
         end
         self.time_widget:setText(self.current_time_str or "0:00 / 0:00")
         self.progress_bar:setPercentage((self.progress or 0) / 100)
-        self.play_pause_button:setText(self.is_playing and "⏸" or "▶", self.play_pause_button.width)
+        self:_refreshPlayButton(self.play_pause_button)
         self.speed_button:setText(self:_speedText(), self.speed_button.width)
         UIManager:setDirty(self, "ui")
     end
@@ -2076,10 +2154,7 @@ function AudiobookPlayer:_updateMiniWidgets()
     if self._mini_time then
         self._mini_time:setText(self.current_time_str or "")
     end
-    if self._mini_play_pause then
-        local txt = self.is_playing and "⏸" or "▶"
-        self._mini_play_pause:setText(txt, self._mini_play_pause.width)
-    end
+    self:_refreshPlayButton(self._mini_play_pause)
     if self._mini_speed then
         self._mini_speed:setText(self:_speedText(), self._mini_speed.width)
     end
@@ -2305,8 +2380,20 @@ function AudiobookPlayer:handleEvent(event)
                 -- button and as one press of anything else, never as a
                 -- gesture for the book underneath.
                 local is_double = ges.ges == "double_tap"
+                -- Hold on a line button: by page instead of by line.
+                if on_bar and ges.ges == "hold" and self.on_skip_page then
+                    if self:_isTapOnMiniButton(ges.pos, self._mini_line_back) then
+                        self.on_skip_page(-1)
+                        return true
+                    end
+                    if self:_isTapOnMiniButton(ges.pos, self._mini_line_forward) then
+                        self.on_skip_page(1)
+                        return true
+                    end
+                end
                 if on_bar and is_double then
-                    for _i, b in ipairs{ self._mini_sync_minus, self._mini_sync_plus } do
+                    for _i, b in pairs{ self._mini_sync_minus, self._mini_sync_plus,
+                            self._mini_line_back, self._mini_line_forward } do
                         if self:_isTapOnMiniButton(ges.pos, b) then
                             b.callback()
                             b.callback()
@@ -2319,6 +2406,13 @@ function AudiobookPlayer:handleEvent(event)
                     if self:_isTapOnMiniButton(ges.pos, self._mini_play_pause) then
                         self:onPlayPause()
                         return true
+                    end
+                    -- Line skip (read-along).
+                    for _i, b in ipairs{ self._mini_line_back, self._mini_line_forward } do
+                        if self:_isTapOnMiniButton(ges.pos, b) then
+                            b.callback()
+                            return true
+                        end
                     end
                     -- Tap on chapter list (mini ☰)?
                     if self._mini_chapters
@@ -2429,9 +2523,20 @@ function AudiobookPlayer:handleEvent(event)
             "minimized=", self._minimized,
             "dragging=", self._scrubber_dragging)
 
-        -- Let hold pass through unconditionally.
+        -- Hold on a line button: by page instead of by line. Any other
+        -- hold passes through.
         -- Swipe is treated as a release when we're in the middle of a drag.
         if ges.ges == "hold" then
+            if self.on_skip_page and ges.pos then
+                if self:_isTapOnWidget(ges.pos, self.line_back_button) then
+                    self.on_skip_page(-1)
+                    return true
+                end
+                if self:_isTapOnWidget(ges.pos, self.line_forward_button) then
+                    self.on_skip_page(1)
+                    return true
+                end
+            end
             return false
         end
         if ges.ges == "swipe" and self._scrubber_dragging then
@@ -2482,7 +2587,8 @@ function AudiobookPlayer:handleEvent(event)
         -- Tap handling
         -- Two quick presses of a sync button arrive as one double_tap.
         if ges.ges == "double_tap" and ges.pos then
-            for _i, b in ipairs{ self.sync_minus_button, self.sync_plus_button } do
+            for _i, b in pairs{ self.sync_minus_button, self.sync_plus_button,
+                    self.line_back_button, self.line_forward_button } do
                 if self:_isTapOnWidget(ges.pos, b) then
                     b.callback()
                     b.callback()
@@ -2529,6 +2635,10 @@ function AudiobookPlayer:handleEvent(event)
             if self.sync_minus_button then
                 table.insert(buttons, self.sync_minus_button)
                 table.insert(buttons, self.sync_plus_button)
+            end
+            if self.line_back_button then
+                table.insert(buttons, self.line_back_button)
+                table.insert(buttons, self.line_forward_button)
             end
             if self.show_shuffle and self.shuffle_button then
                 table.insert(buttons, self.shuffle_button)
@@ -2638,7 +2748,8 @@ function AudiobookPlayer:_doRebuild(new_w, new_h)
     self.current_time_str = time_str
     self.playback_speed = speed
     self.cover_image_path = cover_path
-    self.play_pause_button:setText(was_playing and "⏸" or "▶", self.play_pause_button.width)
+    self:_refreshPlayButton(self.play_pause_button)
+    self:_refreshPlayButton(self._mini_play_pause)
     if chapter and chapter ~= "" then self.chapter_widget:setText(chapter) end
     if output and output ~= "" then self.output_widget = self:_buildOutputWidget(output) end
     self.time_widget:setText(time_str or "0:00 / 0:00")
