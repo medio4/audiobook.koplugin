@@ -1551,6 +1551,34 @@ function MediaSync:_skipOverlayBy(delta_s)
     return true
 end
 
+--- Move n narrated lines (sentences) back (n < 0) or forward (n > 0).
+--- Taps within 2 s add up from the last target, so two quick taps move two
+--- lines even before the first seek has moved the highlight.
+-- @treturn bool true when a seek was issued
+function MediaSync:skipLines(n)
+    if not (self.timing_data and #self.timing_data > 0 and self.media_engine) then
+        return false
+    end
+    local now = os.time()
+    local base = self._current_sentence_idx
+    if self._line_skip_target and self._line_skip_at
+            and now - self._line_skip_at <= 2 then
+        base = self._line_skip_target
+    end
+    if not base or base < 1 then
+        local pos = self.media_engine:getPosition() or 0
+        base = self:_findSentenceAtTime(pos) or 1
+    end
+    local idx = math.max(1, math.min(#self.timing_data, base + n))
+    local entry = self.timing_data[idx]
+    if not (entry and entry.start_time) then return false end
+    self._line_skip_target = idx
+    self._line_skip_at = now
+    logger.warn("MediaSync: skip", n, "line(s):", base, "->", idx)
+    self:seekToTime(entry.start_time)
+    return true
+end
+
 function MediaSync:prevSentence()
     if not self.timing_data then return end
     local idx = self._current_sentence_idx - 1
@@ -2785,6 +2813,11 @@ function MediaSync:showPlaybackBar()
         on_skip_forward = function()
             self:skipForward(30)
         end,
+        -- Line skip (one narrated sentence per tap): read-along only, where
+        -- there is sentence timing.
+        on_skip_line = self.overlay_mode and function(n)
+            self:skipLines(n)
+        end or nil,
         on_prev_chapter = function()
             self:prevChapter()
         end,
