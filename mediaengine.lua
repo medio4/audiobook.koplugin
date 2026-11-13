@@ -3938,7 +3938,9 @@ function MediaEngine:setSpeed(speed)
     -- so they never hit disk.
     if self.plugin and self.plugin.setSetting
             and math.abs(speed - old_speed) >= 0.01 then
-        self.plugin:setSetting("playback_speed", speed)
+        -- Flushed a moment later, not inside the tap (a flush blocks).
+        self.plugin:setSetting("playback_speed", speed, true)
+        if self.plugin._flushSettingsSoon then self.plugin:_flushSettingsSoon() end
     end
 
     if self.backend == self.BACKENDS.ANDROID then

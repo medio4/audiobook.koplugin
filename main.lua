@@ -2600,7 +2600,22 @@ function Audiobook:_saveAlignedPosition(doc_path, audio_path, position, chapter_
         end
         if oldest_key then positions[oldest_key] = nil end
     end
-    self:setSetting("aligned_positions", positions)
+    -- Write to disk just after this tick instead of inside it: this runs
+    -- on ✕ and the flush used to hold the screen until it finished.
+    self:setSetting("aligned_positions", positions, true)
+    self:_flushSettingsSoon()
+end
+
+--- Coalesced settings flush, ~1 s from now (after the current repaint).
+function Audiobook:_flushSettingsSoon()
+    if self._settings_flush_pending then return end
+    self._settings_flush_pending = true
+    UIManager:scheduleIn(1, function()
+        self._settings_flush_pending = nil
+        if G_reader_settings and G_reader_settings.flush then
+            G_reader_settings:flush()
+        end
+    end)
 end
 
 --- Snapshot the current overlay sentence so the next open can restore it

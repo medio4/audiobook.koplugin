@@ -1434,7 +1434,9 @@ function MediaSync:setVolume(pct)
     end
     -- Persist so the level carries across tracks and sessions.
     if self.plugin and self.plugin.setSetting then
-        self.plugin:setSetting("media_volume_pct", pct)
+        -- Flushed a moment later, not inside the tap (a flush blocks).
+        self.plugin:setSetting("media_volume_pct", pct, true)
+        if self.plugin._flushSettingsSoon then self.plugin:_flushSettingsSoon() end
     end
     if self.playback_bar then
         pcall(function() self.playback_bar:updateVolume(pct) end)
