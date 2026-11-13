@@ -416,6 +416,15 @@ function Audiobook:_initSubmodules()
         end
     end)
 
+    -- ── Self-cleaning audiobook cache, a minute after start ──
+    -- Off the startup path; deletes only caches of books not open now.
+    pcall(function()
+        UIManager:scheduleIn(60, function()
+            local ok, err = pcall(self._cleanupCaches, self)
+            if not ok then logger.warn("Audiobook: cache cleanup failed:", err) end
+        end)
+    end)
+
     -- ── Media playback modules (always load; works without a document) ──
     local ok_media, err_media = pcall(function()
         local function dofile_v25(name)
@@ -4981,6 +4990,34 @@ function Audiobook:_loadSmilXPointerCache(doc_path)
     logger.warn("Audiobook: loaded", self:_countTable(copy), "SMIL xpointer entries for",
         doc_path:match("([^/]+)$"), path and "(file)" or "(settings)")
     return copy
+end
+
+--- Self-cleaning caches (see EpubMediaOverlay.cleanupCaches): overlay
+--- caches by EPUB gone / age / size, and xpointer files whose EPUB is gone.
+--- Limits: settings cache_max_age_days (60) and cache_max_total_mb (2048).
+function Audiobook:_cleanupCaches()
+    if not PLUGIN_PATH then return end
+    local keep = self._smil_doc_path
+        or (self.ui and self.ui.document and (self.ui.document.file_path or self.ui.document.file))
+    local EMO = dofile(PLUGIN_PATH .. "epubmediaoverlay.lua")
+    EMO.cleanupCaches(PLUGIN_PATH:gsub("/$", ""), {
+        max_age_days = self:getSetting("cache_max_age_days", 60),
+        max_total_mb = self:getSetting("cache_max_total_mb", 2048),
+        keep_path = keep,
+    })
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    local dir = PLUGIN_PATH .. "cache/xpointers"
+    if not (ok_lfs and lfs and lfs.attributes(dir, "mode") == "directory") then return end
+    for name in lfs.dir(dir) do
+        if name:match("%.bin$") then
+            local t = xpReadFile(dir .. "/" .. name)
+            if t and t.doc_path and t.doc_path ~= keep
+                    and lfs.attributes(t.doc_path, "mode") ~= "file" then
+                logger.warn("Audiobook: cache cleanup: xpointers for missing EPUB", t.doc_path)
+                os.remove(dir .. "/" .. name)
+            end
+        end
+    end
 end
 
 --- Write a pending xpointer cache to its file now (stop, suspend, close).
