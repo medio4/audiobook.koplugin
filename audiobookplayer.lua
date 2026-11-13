@@ -85,6 +85,9 @@ local AudiobookPlayer = InputContainer:extend{
     on_volume = nil,
     -- on_skip_line(n): move n narrated lines (read-along only).
     on_skip_line = nil,
+    -- on_skip_page(dir): hold on the line buttons; -1 top of this page
+    -- (or the previous one), +1 next page.
+    on_skip_page = nil,
     volume_pct = 100,
     on_sleep_timer_set = nil,
     on_sleep_timer_cancel = nil,
@@ -2377,6 +2380,17 @@ function AudiobookPlayer:handleEvent(event)
                 -- button and as one press of anything else, never as a
                 -- gesture for the book underneath.
                 local is_double = ges.ges == "double_tap"
+                -- Hold on a line button: by page instead of by line.
+                if on_bar and ges.ges == "hold" and self.on_skip_page then
+                    if self:_isTapOnMiniButton(ges.pos, self._mini_line_back) then
+                        self.on_skip_page(-1)
+                        return true
+                    end
+                    if self:_isTapOnMiniButton(ges.pos, self._mini_line_forward) then
+                        self.on_skip_page(1)
+                        return true
+                    end
+                end
                 if on_bar and is_double then
                     for _i, b in pairs{ self._mini_sync_minus, self._mini_sync_plus,
                             self._mini_line_back, self._mini_line_forward } do
@@ -2509,9 +2523,20 @@ function AudiobookPlayer:handleEvent(event)
             "minimized=", self._minimized,
             "dragging=", self._scrubber_dragging)
 
-        -- Let hold pass through unconditionally.
+        -- Hold on a line button: by page instead of by line. Any other
+        -- hold passes through.
         -- Swipe is treated as a release when we're in the middle of a drag.
         if ges.ges == "hold" then
+            if self.on_skip_page and ges.pos then
+                if self:_isTapOnWidget(ges.pos, self.line_back_button) then
+                    self.on_skip_page(-1)
+                    return true
+                end
+                if self:_isTapOnWidget(ges.pos, self.line_forward_button) then
+                    self.on_skip_page(1)
+                    return true
+                end
+            end
             return false
         end
         if ges.ges == "swipe" and self._scrubber_dragging then

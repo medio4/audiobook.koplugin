@@ -1584,6 +1584,89 @@ function MediaSync:skipLines(n)
     return true
 end
 
+--- Page of a timing entry's start, from the resolved-xpointer cache.
+--- nil when the sentence was never resolved (or the page is unknown).
+function MediaSync:_entryPage(idx)
+    local e = self.timing_data and self.timing_data[idx]
+    local ui = self.plugin and self.plugin.ui
+    if not (e and e.fragment_id and ui and ui.document and self._xpointer_cache) then
+        return nil
+    end
+    local key = (e.text_doc and e.text_doc ~= "" and e.text_doc .. "#" .. e.fragment_id)
+        or ("#" .. e.fragment_id)
+    local xp = self._xpointer_cache[key]
+    if not xp then return nil end
+    local ok, page = pcall(ui.document.getPageFromXPointer, ui.document, xp)
+    return ok and tonumber(page) or nil
+end
+
+--- Hold on the line buttons. dir < 0: back to the first line that starts
+--- on the current page; if already there (within 1.5 s of its start), the
+--- first line of the previous page. dir > 0: the first line of the next
+--- page. Pages come from cached xpointers; unresolved lines are skipped
+--- over, and the walk is bounded so a gap cannot run away.
+-- @treturn bool true when a seek was issued
+function MediaSync:skipToPage(dir)
+    local n = self.timing_data and #self.timing_data or 0
+    if n == 0 or not self.media_engine then return false end
+    local cur = self._current_sentence_idx
+    if not cur or cur < 1 then
+        cur = self:_findSentenceAtTime(self.media_engine:getPosition() or 0) or 1
+    end
+    local page = self:_entryPage(cur)
+    if not page then
+        local ui = self.plugin and self.plugin.ui
+        local ok, p = pcall(function() return ui.document:getCurrentPage() end)
+        page = ok and tonumber(p) or nil
+    end
+    if not page then return false end
+    local LIMIT = 200
+
+    -- First line starting on `pg`, searching back from `from`.
+    local function topOf(pg, from)
+        local top
+        for i = from, math.max(1, from - LIMIT), -1 do
+            local p = self:_entryPage(i)
+            if p then
+                if p == pg then top = i elseif p < pg then break end
+            end
+        end
+        return top
+    end
+
+    local target
+    if dir < 0 then
+        target = topOf(page, cur)
+        local pos = self.media_engine:getPosition() or 0
+        local e = target and self.timing_data[target]
+        if not target or (target == cur and e and pos - e.start_time < 1.5) then
+            -- Already at the top: the previous page's first line.
+            local prev_page
+            for i = (target or cur) - 1, math.max(1, cur - LIMIT), -1 do
+                local p = self:_entryPage(i)
+                if p and p < page then prev_page = p; target = topOf(p, i); break end
+            end
+            if not prev_page then target = target or 1 end
+        end
+    else
+        for i = cur + 1, math.min(n, cur + LIMIT) do
+            local p = self:_entryPage(i)
+            if p and p > page then target = i break end
+        end
+    end
+    local entry = target and self.timing_data[target]
+    if not (entry and entry.start_time) then
+        logger.warn("MediaSync: skip to page", dir, "found no line from", cur)
+        return false
+    end
+    self._line_skip_target = target
+    self._line_skip_at = os.time()
+    logger.warn("MediaSync: skip to page", dir, ": line", cur, "->", target,
+        "page", page, "->", self:_entryPage(target))
+    self:seekToTime(entry.start_time)
+    return true
+end
+
 function MediaSync:prevSentence()
     if not self.timing_data then return end
     local idx = self._current_sentence_idx - 1
@@ -2822,6 +2905,10 @@ function MediaSync:showPlaybackBar()
         -- there is sentence timing.
         on_skip_line = self.overlay_mode and function(n)
             self:skipLines(n)
+        end or nil,
+        -- Hold on the line buttons: top of this page / next page.
+        on_skip_page = self.overlay_mode and function(dir)
+            self:skipToPage(dir)
         end or nil,
         on_prev_chapter = function()
             self:prevChapter()
