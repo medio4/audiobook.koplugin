@@ -629,6 +629,19 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("When enabled, play/pause/next/prev buttons on a Bluetooth headset or speaker will control playback. The connected device will also show playback status.\n\nOn Kindle, stem clicks are read from Lab126 LIPC (playermgr / audiomgrd) because this firmware has no AVRCP evdev node."),
                     },
                     {
+                        text = _("Auto reconnect while playing"),
+                        enabled_func = function()
+                            return not (Device.isKindle and Device:isKindle())
+                        end,
+                        checked_func = function()
+                            return BtUI.autoReconnectEnabled(self)
+                        end,
+                        callback = function()
+                            self:toggleSetting("bt_auto_reconnect", true)
+                        end,
+                        help_text = _("When the headset drops while a book is playing, pause, reconnect without asking, and resume where you were. The link is checked every 5 seconds while this is on.\n\nIf it cannot reconnect within 2 minutes, the Reconnect prompt appears instead. Off: you get the disconnect message and the prompt, as before."),
+                    },
+                    {
                         text = _("Reconnect BT on track change"),
                         enabled_func = function()
                             return Device.isKindle and Device:isKindle()
