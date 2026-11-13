@@ -585,6 +585,16 @@ function BtUI._autoReconnectOnDrop(plugin)
 
     local started = UIManager:getTime()
     local tick = 0
+    local up_count = 0
+    -- MTK forgets a disconnected device. Scan in the background (no UI
+    -- freeze) and only call connect once the device is visible again.
+    local scanning = false
+    local function stop_scan()
+        if scanning then
+            scanning = false
+            pcall(bt.stopDiscovery, bt)
+        end
+    end
     local function still_ours()
         -- Abort if the user resumed, stopped, or a newer drop took over.
         return plugin._bt_auto_reconnect_token == token
@@ -592,21 +602,42 @@ function BtUI._autoReconnectOnDrop(plugin)
     end
     local function step()
         if not still_ours() then
+            stop_scan()
             logger.warn("BtUI: auto reconnect cancelled (state changed)")
             return
         end
         tick = tick + 1
-        if BtUI.AUTO_RECONNECT_CONNECT_TICKS[tick] then
+        local known = true
+        if bt.deviceKnown then
+            local okk, k = pcall(bt.deviceKnown, bt, address)
+            known = okk and k
+        end
+        if not known then
+            if not scanning then
+                local oks = pcall(bt.startDiscovery, bt)
+                scanning = oks
+                logger.warn("BtUI: headset not visible; scanning in the background")
+            end
+        elseif scanning or BtUI.AUTO_RECONNECT_CONNECT_TICKS[tick] then
+            -- Just reappeared (or a scheduled retry): connect now.
+            stop_scan()
             pcall(bt.connect, bt, address)
             if not still_ours() then return end
         end
         pcall(bt.clearAudioDeviceCache, bt)
         local ok, up = pcall(bt.anyAudioDeviceConnected, bt)
-        if ok and up then
+        -- Need the link up on two checks in a row: right after going into
+        -- the case the link can flap, and resuming into it drops again.
+        if ok and up then up_count = up_count + 1 else up_count = 0 end
+        if up_count == 1 then
+            logger.warn("BtUI: headset link up; confirming before resuming")
+        end
+        if up_count >= 2 then
+            stop_scan()
             local elapsed = require("ui/time").to_s(UIManager:getTime() - started)
             logger.warn("BtUI: headset back after", elapsed, "s; resuming")
-            -- Give A2DP a moment to come up behind the link.
-            UIManager:scheduleIn(2, function()
+            -- The link was already confirmed 3 s apart; A2DP is up behind it.
+            UIManager:scheduleIn(0.5, function()
                 if not still_ours() then return end
                 plugin._bt_last_connected = true
                 plugin._bt_silent_warned = nil
@@ -621,6 +652,7 @@ function BtUI._autoReconnectOnDrop(plugin)
         end
         local elapsed = require("ui/time").to_s(UIManager:getTime() - started)
         if elapsed >= BtUI.AUTO_RECONNECT_GIVE_UP_S then
+            stop_scan()
             logger.warn("BtUI: auto reconnect gave up after", elapsed, "s")
             plugin._bt_silent_warned = nil
             BtUI._showBtSilentDialog(plugin)
