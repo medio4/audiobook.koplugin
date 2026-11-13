@@ -927,6 +927,9 @@ function MediaSync:stop(keep_chapter_menu, opts)
     end
     self.state = self.STATE.STOPPED
     self._chain_generation = self._chain_generation + 1
+    -- A line-skip selection belongs to this file's timing; never seek it
+    -- into whatever plays next.
+    self:_cancelSelection()
 
     if self._sync_timer then
         UIManager:unschedule(self._sync_timer)
@@ -1556,32 +1559,78 @@ function MediaSync:_skipOverlayBy(delta_s)
     return true
 end
 
+-- ── Line skip as a selector ───────────────────────────────────────────
+-- Taps (and holds) on the line buttons move a selection: the highlight,
+-- the page and the line view jump to the chosen line at once while the
+-- audio keeps playing where it was. SELECT_COMMIT_S after the last tap the
+-- audio jumps there, once, instead of seeking on every tap.
+MediaSync.SELECT_COMMIT_S = 0.9
+
+--- The line a skip counts from: the pending selection, else the line
+--- being narrated.
+function MediaSync:_skipBase()
+    if self._sel_idx then return self._sel_idx end
+    local base = self._current_sentence_idx
+    if not base or base < 1 then
+        local pos = self.media_engine and self.media_engine:getPosition() or 0
+        base = self:_findSentenceAtTime(pos) or 1
+    end
+    return base
+end
+
+--- Select line idx: show it now, commit (seek) after a short pause.
+function MediaSync:_selectLine(idx)
+    local entry = self.timing_data and self.timing_data[idx]
+    if not (entry and entry.start_time) then return false end
+    self._sel_idx = idx
+    pcall(self._updateHighlightAtTime, self, entry.start_time)
+    if self._sel_timer then UIManager:unschedule(self._sel_timer) end
+    self._sel_timer = function() self:_commitSelection() end
+    UIManager:scheduleIn(self.SELECT_COMMIT_S, self._sel_timer)
+    return true
+end
+
+--- Drop a pending selection without seeking (stop, track change).
+function MediaSync:_cancelSelection()
+    if self._sel_timer then
+        UIManager:unschedule(self._sel_timer)
+        self._sel_timer = nil
+    end
+    self._sel_idx = nil
+end
+
+function MediaSync:_commitSelection()
+    self._sel_timer = nil
+    local idx = self._sel_idx
+    self._sel_idx = nil
+    local entry = idx and self.timing_data and self.timing_data[idx]
+    if not (entry and entry.start_time) then return end
+    -- The highlight runs smil_sync_offset_ms behind the audio clock, so the
+    -- line's audio starts that much after its SMIL time. Seeking there
+    -- keeps the highlight on the chosen line instead of flashing the
+    -- previous one for the length of the offset.
+    local off = 0
+    if self.plugin and self.plugin.getSetting then
+        off = (self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
+    end
+    local t = entry.start_time + off
+    if entry.end_time and entry.end_time > entry.start_time and t >= entry.end_time then
+        t = entry.start_time
+    end
+    logger.warn("MediaSync: selection committed: line", idx, "at", t)
+    self:seekToTime(math.max(0, t))
+end
+
 --- Move n narrated lines (sentences) back (n < 0) or forward (n > 0).
---- Taps within 2 s add up from the last target, so two quick taps move two
---- lines even before the first seek has moved the highlight.
--- @treturn bool true when a seek was issued
+-- @treturn bool true when a line was selected
 function MediaSync:skipLines(n)
     if not (self.timing_data and #self.timing_data > 0 and self.media_engine) then
         return false
     end
-    local now = os.time()
-    local base = self._current_sentence_idx
-    if self._line_skip_target and self._line_skip_at
-            and now - self._line_skip_at <= 2 then
-        base = self._line_skip_target
-    end
-    if not base or base < 1 then
-        local pos = self.media_engine:getPosition() or 0
-        base = self:_findSentenceAtTime(pos) or 1
-    end
+    local base = self:_skipBase()
     local idx = math.max(1, math.min(#self.timing_data, base + n))
-    local entry = self.timing_data[idx]
-    if not (entry and entry.start_time) then return false end
-    self._line_skip_target = idx
-    self._line_skip_at = now
     logger.warn("MediaSync: skip", n, "line(s):", base, "->", idx)
-    self:seekToTime(entry.start_time)
-    return true
+    return self:_selectLine(idx)
 end
 
 --- Page of a timing entry's start, from the resolved-xpointer cache.
@@ -1619,10 +1668,8 @@ end
 function MediaSync:skipToPage(dir)
     local n = self.timing_data and #self.timing_data or 0
     if n == 0 or not self.media_engine then return false end
-    local cur = self._current_sentence_idx
-    if not cur or cur < 1 then
-        cur = self:_findSentenceAtTime(self.media_engine:getPosition() or 0) or 1
-    end
+    local selecting = self._sel_idx ~= nil
+    local cur = self:_skipBase()
     local page = self:_entryPage(cur)
     if not page then
         local ui = self.plugin and self.plugin.ui
@@ -1649,7 +1696,10 @@ function MediaSync:skipToPage(dir)
         target = topOf(page, cur)
         local pos = self.media_engine:getPosition() or 0
         local e = target and self.timing_data[target]
-        if not target or (target == cur and e and pos - e.start_time < 1.5) then
+        -- "Already at the top": a pending selection sitting on the top
+        -- line, or narration within 1.5 s of its start.
+        if not target or (target == cur
+                and (selecting or (e and pos - e.start_time < 1.5))) then
             -- Already at the top: the previous page's first line.
             local prev_page
             for i = (target or cur) - 1, math.max(1, cur - LIMIT), -1 do
@@ -1669,12 +1719,9 @@ function MediaSync:skipToPage(dir)
         logger.warn("MediaSync: skip to page", dir, "found no line from", cur)
         return false
     end
-    self._line_skip_target = target
-    self._line_skip_at = os.time()
     logger.warn("MediaSync: skip to page", dir, ": line", cur, "->", target,
         "page", page, "->", self:_entryPage(target))
-    self:seekToTime(entry.start_time)
-    return true
+    return self:_selectLine(target)
 end
 
 function MediaSync:prevSentence()
@@ -2034,7 +2081,11 @@ function MediaSync:_startSyncLoop(gen)
         if self.plugin and self.plugin.getSetting then
             off = (self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
         end
-        self:_updateHighlightAtTime(math.max(0, pos - lat - off))
+        -- While line skip is selecting, the highlight shows the selection;
+        -- the audio keeps playing until the selection is committed.
+        if not self._sel_idx then
+            self:_updateHighlightAtTime(math.max(0, pos - lat - off))
+        end
 
         -- Check for sentence/chapter boundary advancement
         self:_checkAutoAdvance(pos)
