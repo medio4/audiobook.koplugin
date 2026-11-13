@@ -676,12 +676,14 @@ local EVENT_KEY = "audiobook:bt_watch"
 
 local function koboDbusMonitor(plugin)
     local ui = plugin and plugin.ui
-    local kp = ui and ui.kobo_plugin
+    -- PluginLoader names a plugin after its folder (kobo.koplugin -> "kobo");
+    -- the "kobo_plugin" in its source is ignored for that.
+    local kp = ui and (ui.kobo or ui.kobo_plugin)
     local kb = kp and kp.kobo_bluetooth
     local mon = kb and kb.dbus_monitor
     local why
     if not ui then why = "no ui"
-    elseif not kp then why = "no ui.kobo_plugin"
+    elseif not kp then why = "no ui.kobo"
     elseif not kb then why = "no kobo_bluetooth"
     elseif not mon then why = "no dbus_monitor"
     elseif not (mon.registerCallback and mon.unregisterCallback) then why = "no callback API"
