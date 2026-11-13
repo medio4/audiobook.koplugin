@@ -1794,10 +1794,30 @@ end
 --- its slot is cut with an ellipsis rather than spilling into its neighbours.
 function AudiobookPlayer:_makeLineWidget(i, text)
     local spec = self._line_specs[i]
+    -- The line being narrated is never cut off: step the font down until the
+    -- whole sentence fits its slot. Only a sentence too long even at the
+    -- smallest size falls through to the ellipsis below.
+    if spec.shrink then
+        local size = spec.size
+        while size >= spec.min_size do
+            local w = TextBoxWidget:new{
+                text = text or "",
+                face = Font:getFace("cfont", size),
+                bold = spec.bold,
+                fgcolor = spec.color,
+                bgcolor = self:_getThemeBackground(),
+                width = self._cover_width,
+                alignment = "center",
+            }
+            if w:getSize().h <= spec.h then return w end
+            w:free()
+            size = size - 2
+        end
+    end
     local function build(height)
         return TextBoxWidget:new{
             text = text or "",
-            face = Font:getFace("cfont", spec.size),
+            face = Font:getFace("cfont", spec.min_size or spec.size),
             bold = spec.bold,
             fgcolor = spec.color,
             bgcolor = self:_getThemeBackground(),
@@ -1821,11 +1841,12 @@ end
 function AudiobookPlayer:_buildLinesFrame()
     local h = self._cover_height
     local gap = Size.padding.large
-    local side_h = math.floor(h * 0.22)
+    local side_h = math.floor(h * 0.2)
     self._line_specs = {
-        { size = 17, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
-        { size = 26, bold = true, color = Blitbuffer.COLOR_BLACK, h = h - side_h * 2 - gap * 2 },
-        { size = 17, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
+        { size = 18, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
+        { size = 28, min_size = 14, shrink = true, bold = true,
+          color = Blitbuffer.COLOR_BLACK, h = h - side_h * 2 - gap * 2 },
+        { size = 18, color = Blitbuffer.COLOR_DARK_GRAY, h = side_h },
     }
     local lines = self._lines or {}
     self._line_slots = {}
