@@ -74,8 +74,51 @@ Tries evdev first, falls back to D-Bus polling.
 
 @param plugin  The Audiobook plugin instance (for pause/resume/next/prev callbacks)
 --]]
+-- KOReader's Kobo plugin (kobo.koplugin) opens the headset's AVRCP node on
+-- its own isolated input handler, so its key bindings decide what a stem
+-- press does and our key map never sees it. A binding made by pressing the
+-- stem once only captures the key sent at that moment (KEY_200, "play").
+-- Once the headset believes we are playing it sends KEY_201 ("pause")
+-- instead, which nothing handles, so every other press did nothing.
+local TOGGLE_ACTION = "Reader:audiobook_toggle"
+local TOGGLE_KEYS = { "KEY_200", "KEY_201", "KEY_164" }
+
+--- For each headset with a "Toggle Read-Along" binding in the Kobo plugin,
+--- bind the other play/pause key codes to the same action. Never replaces
+--- a binding the user set. Edits the live settings table, which the Kobo
+--- plugin reads on every key press.
+-- @treturn int number of bindings added
+function BtMediaControl.ensureKoboPluginToggleKeys()
+    if not (Device.isKobo and Device:isKobo()) then return 0 end
+    if not G_reader_settings then return 0 end
+    local ks = G_reader_settings:readSetting("kobo_plugin")
+    local all = type(ks) == "table" and ks.bluetooth_key_bindings
+    if type(all) ~= "table" then return 0 end
+    local added = 0
+    for mac, bindings in pairs(all) do
+        if type(bindings) == "table" then
+            local has_toggle = false
+            for _k, action in pairs(bindings) do
+                if action == TOGGLE_ACTION then has_toggle = true break end
+            end
+            if has_toggle then
+                for _i, key in ipairs(TOGGLE_KEYS) do
+                    if bindings[key] == nil then
+                        bindings[key] = TOGGLE_ACTION
+                        added = added + 1
+                        logger.warn("BtMediaControl: bound", key, "to", TOGGLE_ACTION,
+                            "for", mac, "in the Kobo plugin")
+                    end
+                end
+            end
+        end
+    end
+    return added
+end
+
 function BtMediaControl.start(plugin)
     BtMediaControl._plugin = plugin
+    pcall(BtMediaControl.ensureKoboPluginToggleKeys)
 
     -- Android (Boox): AVRCP arrives via MediaSession, not BlueZ evdev.
     if Device.isAndroid and Device:isAndroid() then
