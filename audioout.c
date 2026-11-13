@@ -376,6 +376,23 @@ static struct {
     int fifo_fd;
     unsigned long long fifo_written;    /* input bytes handed to the fifo */
 
+    /* Feed relay (gst output, external mode without in-process decode):
+     * the outside writer (ffmpeg) fills a second fifo and the daemon
+     * copies it into the pipeline fifo. Owning every byte the pipeline
+     * sees lets a seek/resume/new stream start a fresh epoch WITHOUT
+     * tearing the vendor sink down (soft epoch): the daemon keeps the
+     * sample framing aligned, feeds keepalive silence while paused, and
+     * knows exactly when the new stream's first byte went in. Closing
+     * the MTK sink costs 3-4 s per seek and drops the A2DP link. */
+    char feed_path[MAX_PATH];
+    int feed_fd;
+    unsigned long long align_bytes;     /* bytes filesrc has been given,
+                                           modulo-accurate for framing */
+    int relay_fresh;                    /* next relayed byte starts a stream */
+    int discard_probe;                  /* old-stream residue is crossing
+                                           the probe: hold the clock */
+    unsigned long long soft_epochs;
+
     Clip queue[MAX_QUEUE];
     int queue_len;
     int feed_idx;                       /* clip being fed, -1 = none active */
@@ -481,9 +498,21 @@ static void
 refresh_clock(void) {
     unsigned long long b, last;
     pthread_mutex_lock(&probe_lock);
+    if (S.discard_probe) {
+        /* Soft epoch pending: whatever crosses the sink now is residue of
+         * the old stream (or keepalive silence). Not part of the new
+         * stream's clock. */
+        probe_bytes = 0;
+        probe_last_buf = 0;
+    }
     b = probe_bytes;
     last = probe_last_buf;
     pthread_mutex_unlock(&probe_lock);
+    if (S.discard_probe) {
+        acc_bytes = 0;
+        probe_seen = 0;
+        return;
+    }
     if (b != acc_bytes || (b > 0 && !probe_seen)) {
         probe_seen = 1;
         acc_bytes = b;
@@ -583,6 +612,7 @@ audible_ms(void) {
 static const char *g_socket_path = SOCKET_PATH_DEFAULT;
 static const char *g_sink_name = "mtkbtmwrpcaudiosink";
 static const char *g_output = "auto";   /* auto | mtk | alsa */
+static int g_hard_epoch;                /* --hard-epoch: always rebuild */
 static int g_rate = 22050, g_channels = 1;
 static long long g_started_ms;
 
@@ -796,6 +826,7 @@ pipeline_build(int rate, int channels) {
     }
     S.pipe_rate = rate;
     S.pipe_channels = channels;
+    S.align_bytes = 0;
     return 0;
 }
 
@@ -1097,7 +1128,108 @@ fifo_write(const unsigned char *buf, unsigned long long len) {
         break;
     }
     S.fifo_written += total;
+    S.align_bytes += total;
     return total;
+}
+
+/* ── Feed relay (see the S.feed_* comment) ───────────────────────── */
+
+static unsigned char relay_buf[FEED_CHUNK];
+static size_t relay_len, relay_off;
+
+static int
+feed_open(void) {
+    if (S.feed_fd >= 0) return 0;
+    if (mkfifo(S.feed_path, 0600) != 0 && errno != EEXIST) {
+        log_line("mkfifo %s failed: %s", S.feed_path, strerror(errno));
+        return -1;
+    }
+    /* O_RDWR: no EOF when a feeder dies, no block when none is attached. */
+    int fd = open(S.feed_path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        log_line("feed fifo open failed: %s (%s)", S.feed_path,
+                 strerror(errno));
+        return -1;
+    }
+    fcntl(fd, F_SETPIPE_SZ, 16384);
+    S.feed_fd = fd;
+    return 0;
+}
+
+/* Drop everything the dead feeder left behind. */
+static void
+feed_drain(void) {
+    relay_len = relay_off = 0;
+    if (S.feed_fd < 0) return;
+    unsigned char tmp[4096];
+    while (read(S.feed_fd, tmp, sizeof tmp) > 0) {}
+}
+
+static int
+frame_bytes(void) {
+    int ch = S.pipe_channels > 0 ? S.pipe_channels : 2;
+    return ch * 2;
+}
+
+/* Pad the pipeline fifo to a whole sample frame. rawaudioparse never
+ * resynchronises: one stray byte swaps/garbles every later sample. Returns
+ * 1 when aligned (0: fifo full, try next tick). */
+static int
+align_stream(void) {
+    static const unsigned char zeros[16];
+    int frame = frame_bytes();
+    unsigned rem = (unsigned)(S.align_bytes % (unsigned long long)frame);
+    if (rem == 0) return 1;
+    fifo_write(zeros, (unsigned long long)(frame - rem));
+    return (S.align_bytes % (unsigned long long)frame) == 0;
+}
+
+static void
+keepalive_silence(void) {
+    if (wall_now < S.next_ka_ms) return;
+    if (!align_stream()) return;
+    fifo_write(silence_chunk, SILENCE_CHUNK);
+    int bps = (S.pipe_rate > 0 ? S.pipe_rate : 44100) * frame_bytes();
+    S.next_ka_ms = wall_now + (long long)SILENCE_CHUNK * 1000LL / bps;
+}
+
+static void
+relay_pump(void) {
+    if (S.feed_fd < 0 || S.fifo_fd < 0) return;
+    unsigned long long budget = 4ull * FEED_CHUNK;
+    while (budget > 0) {
+        if (relay_off >= relay_len) {
+            ssize_t n = read(S.feed_fd, relay_buf, sizeof relay_buf);
+            if (n <= 0) {
+                /* No feeder data yet after an epoch: keep the sink fed so
+                 * the A2DP stream does not suspend under us. */
+                if (S.relay_fresh) keepalive_silence();
+                return;
+            }
+            relay_len = (size_t)n;
+            relay_off = 0;
+        }
+        if (S.relay_fresh) {
+            if (!align_stream()) return;
+            S.relay_fresh = 0;
+            if (S.discard_probe) {
+                pthread_mutex_lock(&probe_lock);
+                probe_bytes = 0;
+                probe_last_buf = 0;
+                pthread_mutex_unlock(&probe_lock);
+                acc_bytes = 0;
+                probe_seen = 0;
+                S.discard_probe = 0;
+                S.anchor_wait = 1;
+            }
+            log_line("relay: new stream flowing");
+        }
+        unsigned long long w =
+            fifo_write(relay_buf + relay_off, relay_len - relay_off);
+        relay_off += (size_t)w;
+        budget -= w;
+        if (relay_off < relay_len) return;      /* pipeline fifo full */
+    }
 }
 
 /* One feed tick: active clip, then inter-clip gap, then keepalive. */
@@ -1122,7 +1254,18 @@ feed_tick(void) {
         /* ALSA external mode: the daemon READS the fifo (ffmpeg writes it)
          * and writes the PCM; gst external mode leaves the fifo to filesrc.
          * While paused, feed keepalive silence so the link stays up. */
-        if (!S.out_alsa) return;
+        if (!S.out_alsa) {
+            if (S.fifo_fd < 0 || !S.pipe) return;
+            if (S.paused) {
+                /* The feeder is dead while paused; silence holds the A2DP
+                 * link so resume is a soft epoch, not a sink rebuild. */
+                relay_len = relay_off = 0;
+                keepalive_silence();
+                return;
+            }
+            relay_pump();
+            return;
+        }
         if (S.paused || S.fifo_fd < 0) {
             fifo_write(silence_chunk, SILENCE_CHUNK);
             return;
@@ -1296,7 +1439,11 @@ static void
 fifo_drain(void) {
     if (S.fifo_fd < 0) return;
     unsigned char tmp[4096];
-    while (read(S.fifo_fd, tmp, sizeof tmp) > 0) {}
+    ssize_t n;
+    /* Bytes we steal never reach filesrc: keep the framing count honest
+     * (congruent modulo every frame size in use). */
+    while ((n = read(S.fifo_fd, tmp, sizeof tmp)) > 0)
+        S.align_bytes += 16 - ((unsigned long long)n % 16);
 }
 
 /* Begin a fresh stream epoch at client position pos_ms: drop every byte of
@@ -1323,11 +1470,40 @@ stream_epoch(long long pos_ms, long long total_ms) {
         fifo_drain();
         S.alsa_written_frames = 0;
     } else {
-        pipeline_teardown();
-        reset_stream();
-        if (fifo_open() != 0) return -1;
-        fifo_drain();
-        if (pipeline_build(g_rate, g_channels) != 0) return -1;
+        int relay = 1;
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.ext_dec) relay = 0;
+#endif
+        if (relay && S.pipe && S.fifo_fd >= 0 && !g_hard_epoch
+                && S.pipe_rate == g_rate && S.pipe_channels == g_channels) {
+            /* Soft epoch: the sink and the A2DP stream stay up. */
+            unsigned long long keep = S.align_bytes;
+            if (feed_open() != 0) return -1;
+            feed_drain();
+            fifo_drain();
+            keep = S.align_bytes;
+            reset_stream();
+            S.align_bytes = keep;
+            S.soft_epochs++;
+            log_line("soft epoch #%llu at %lldms", S.soft_epochs, pos_ms);
+        } else {
+            pipeline_teardown();
+            reset_stream();
+            if (fifo_open() != 0) return -1;
+            fifo_drain();
+            if (pipeline_build(g_rate, g_channels) != 0) return -1;
+            if (relay) {
+                if (feed_open() != 0) return -1;
+                feed_drain();
+            }
+        }
+        if (relay) {
+            S.relay_fresh = 1;
+            S.discard_probe = 1;
+        } else {
+            S.relay_fresh = 0;
+            S.discard_probe = 0;
+        }
     }
     S.epoch_off_ms = pos_ms;
     S.external_base_ms = 0;
@@ -1348,8 +1524,9 @@ handle_command(char *line) {
 #ifdef AUDIOOUT_WITH_LIBAV
                 ",\"decoder\":1"
 #endif
-                "}",
-                mono_ms() - g_started_ms, acc_bytes / OUT_BYTES_PER_MS);
+                ",\"soft\":%d,\"soft_epochs\":%llu}",
+                mono_ms() - g_started_ms, acc_bytes / OUT_BYTES_PER_MS,
+                (!S.out_alsa && !g_hard_epoch) ? 1 : 0, S.soft_epochs);
     } else if (!strcmp(cmd, "play")) {
         char path[MAX_PATH] = "";
         json_find(line, "path", path, sizeof path);
@@ -1477,6 +1654,9 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "flush")) {
         drop_queue();
         S.external_active = 0;
+        feed_drain();
+        S.relay_fresh = 0;
+        S.discard_probe = 0;
 #ifdef AUDIOOUT_WITH_LIBAV
         if (S.ext_dec) { dec_close((DecState *)S.ext_dec); S.ext_dec = NULL; }
 #endif
@@ -1580,8 +1760,20 @@ handle_command(char *line) {
         S.paused = 0;
         log_line("external stream mode (%d x %d) at %lldms/%lldms",
                  g_rate, g_channels, pos_ms, total_ms);
-        respond("{\"ok\":true,\"mode\":\"external\",\"fifo\":\"%s\"}",
-                S.fifo_path);
+        {
+            /* Where the outside writer must write: the relay fifo on the
+             * gst path, the pipeline/ALSA fifo otherwise. */
+            const char *wr = S.fifo_path;
+            if (!S.out_alsa) {
+                wr = S.feed_path;
+#ifdef AUDIOOUT_WITH_LIBAV
+                if (S.ext_dec) wr = S.fifo_path;
+#endif
+            }
+            respond("{\"ok\":true,\"mode\":\"external\",\"fifo\":\"%s\","
+                    "\"feed_fifo\":\"%s\",\"soft\":%d}",
+                    S.fifo_path, wr, (!S.out_alsa && !g_hard_epoch) ? 1 : 0);
+        }
     } else if (!strcmp(cmd, "release")) {
         drop_queue();
         S.external_active = 0;
@@ -1600,6 +1792,9 @@ handle_command(char *line) {
             pipeline_teardown();
             reset_stream();
         }
+        feed_drain();
+        S.relay_fresh = 0;
+        S.discard_probe = 0;
         respond("{\"ok\":true,\"state\":\"released\"}");
     } else if (!strcmp(cmd, "status")) {
         /* Cap at the end of REAL audio: idle keepalive silence advances
@@ -1806,6 +2001,8 @@ main(int argc, char **argv) {
             g_sink_name = argv[++i];
         else if (!strcmp(argv[i], "--output") && i + 1 < argc)
             g_output = argv[++i];
+        else if (!strcmp(argv[i], "--hard-epoch"))
+            g_hard_epoch = 1;
         else if (!strcmp(argv[i], "--alsa-device") && i + 1 < argc)
             snprintf(S.alsa_device, sizeof S.alsa_device, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -1821,6 +2018,8 @@ main(int argc, char **argv) {
     /* Static struct: fd sentinels must be -1, not 0 (fd 0 is stdin and
      * would make fifo_open think it is already open). */
     S.fifo_fd = -1;
+    S.feed_fd = -1;
+    snprintf(S.feed_path, sizeof S.feed_path, "%s.in", S.fifo_path);
     S.listen_fd = -1;
     S.client_fd = -1;
     if (S.volume <= 0) S.volume = 1.0;

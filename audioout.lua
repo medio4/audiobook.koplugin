@@ -171,6 +171,9 @@ end
 -- Kill the daemon outright and clear its socket. The mtk sink allows one
 -- open instance, so a wedged daemon must go before a new one can play.
 function AudioOut:killDaemon()
+    self._feed_fifo = nil
+    self._soft = nil
+    self._status_cache = nil
     os.execute("killall -9 audioout 2>/dev/null; rm -f '"
         .. self.socket_path .. "'")
 end
@@ -218,10 +221,28 @@ function AudioOut:release() return self:_command({ cmd = "release" }, 8000) end
 -- length): the daemon's clock, status cap and completion latch all speak
 -- book positions from then on.
 function AudioOut:externalStart(rate, channels, alsa_device, pos_ms, total_ms, path)
-    return self:_command({ cmd = "external", rate = rate or 44100,
+    self._status_cache = nil
+    local resp = self:_command({ cmd = "external", rate = rate or 44100,
                            channels = channels or 2, alsa_device = alsa_device,
                            pos_ms = pos_ms, total_ms = total_ms,
                            path = path }, 8000)
+    if resp and resp.ok then
+        -- Newer daemons relay the feeder through their own fifo and can
+        -- re-epoch (seek/resume) without rebuilding the sink.
+        self._feed_fifo = resp.feed_fifo
+        self._soft = resp.soft == 1
+    end
+    return resp
+end
+
+-- Where the ffmpeg feeder writes: the daemon's relay fifo when it has one.
+function AudioOut:feederFifoPath()
+    return self._feed_fifo or self:fifoPath()
+end
+
+-- True when seek/pause/resume keep the sink (and the A2DP link) open.
+function AudioOut:isSoft()
+    return self._soft == true
 end
 
 -- True when the running daemon was built with in-process decode (it then

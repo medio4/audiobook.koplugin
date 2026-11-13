@@ -2411,7 +2411,7 @@ function MediaEngine:_spawnAudiooutFeeder(offset, filter_chain, wav_out)
     local cmd = string.format(
         '%s -ss %s -i "%s" %s -f s16le -ar 44100 -ac 2 - %s > "%s" 2>> "%s" & echo $!',
         ffmpeg, tostring(offset or 0), self.current_path, filter_arg,
-        wav_out or "", ao:fifoPath(), log)
+        wav_out or "", ao.feederFifoPath and ao:feederFifoPath() or ao:fifoPath(), log)
     local pid_f = io.popen(cmd)
     local pid = pid_f and tonumber(pid_f:read("*l") or "")
     if pid_f then pid_f:close() end
