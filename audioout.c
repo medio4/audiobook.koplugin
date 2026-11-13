@@ -392,8 +392,6 @@ static struct {
     int discard_probe;                  /* old-stream residue is crossing
                                            the probe: hold the clock */
     unsigned long long soft_epochs;
-    int muted;                          /* pause mute on the vol element
-                                           (gst path); see pipe_mute() */
 
     Clip queue[MAX_QUEUE];
     int queue_len;
@@ -773,7 +771,6 @@ static int
 pipeline_build(int rate, int channels) {
     S.anchor_wait = 1;
     S.external_frozen_ms = 0;
-    S.muted = 0;                /* a new vol element starts at S.volume */
     char launch[1600];
     char vol[64] = "";
     if (G.gst_element_factory_find && G.gst_element_factory_find("volume"))
@@ -1135,24 +1132,6 @@ fifo_write(const unsigned char *buf, unsigned long long len) {
     return total;
 }
 
-/* Pause mute (gst path). The pause command only stops new audio going
- * in; the 500 ms queue and the sink's firmware buffer kept playing for
- * about a second after the tap. The vol element sits after the queue,
- * right before the sink, so zeroing it silences the queued audio at
- * once. Unmuted when the resumed stream starts flowing (relay) or on
- * resume (other paths). ALSA output keeps the old behaviour. */
-static void
-pipe_mute(int on) {
-    if (S.out_alsa || !S.pipe || !G.g_object_set) { S.muted = 0; return; }
-    if (S.muted == on) return;
-    GstElement *el = G.gst_bin_get_by_name(GST_BIN(S.pipe), "vol");
-    if (!el) { S.muted = 0; return; }
-    G.g_object_set(el, "volume", on ? 0.0 : S.volume, (char *)NULL);
-    G.gst_object_unref(el);
-    S.muted = on;
-    log_line(on ? "mute (pause)" : "unmute");
-}
-
 /* ── Feed relay (see the S.feed_* comment) ───────────────────────── */
 
 static unsigned char relay_buf[FEED_CHUNK];
@@ -1244,7 +1223,6 @@ relay_pump(void) {
                 S.anchor_wait = 1;
             }
             log_line("relay: new stream flowing");
-            pipe_mute(0);
         }
         unsigned long long w =
             fifo_write(relay_buf + relay_off, relay_len - relay_off);
@@ -1550,7 +1528,6 @@ handle_command(char *line) {
                 mono_ms() - g_started_ms, acc_bytes / OUT_BYTES_PER_MS,
                 (!S.out_alsa && !g_hard_epoch) ? 1 : 0, S.soft_epochs);
     } else if (!strcmp(cmd, "play")) {
-        if (!S.paused) pipe_mute(0);
         char path[MAX_PATH] = "";
         json_find(line, "path", path, sizeof path);
         if (!path[0]) {
@@ -1635,7 +1612,6 @@ handle_command(char *line) {
                      (long long)(acc_bytes / OUT_BYTES_PER_MS));
         }
         S.paused = 1;
-        if (!g_hard_epoch) pipe_mute(1);
         respond("{\"ok\":true,\"state\":\"paused\"}");
     } else if (!strcmp(cmd, "resume")) {
         long long pos_ms = json_num(line, "pos_ms", -1);
@@ -1671,13 +1647,9 @@ handle_command(char *line) {
             S.anchor_wait = 1;
         }
         S.paused = 0;
-        /* Relay: stay muted until the resumed stream flows (relay_pump),
-         * so queued residue of the paused stream is not heard. */
-        if (!S.relay_fresh) pipe_mute(0);
         respond("{\"ok\":true,\"state\":\"%s\"}", state_str());
     } else if (!strcmp(cmd, "stop")) {
         drop_queue();
-        pipe_mute(0);
         respond("{\"ok\":true,\"state\":\"idle\"}");
     } else if (!strcmp(cmd, "flush")) {
         drop_queue();
@@ -1868,11 +1840,6 @@ handle_command(char *line) {
             /* Applied in software to every byte written after this point;
              * only the fifo tail already handed to the driver is not
              * retroactive. */
-            respond("{\"ok\":true,\"volume\":%.2f,\"live\":true}", vol);
-            return;
-        }
-        if (S.muted) {
-            /* Paused: store it; pipe_mute(0) applies it on resume. */
             respond("{\"ok\":true,\"volume\":%.2f,\"live\":true}", vol);
             return;
         }
