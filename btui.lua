@@ -664,14 +664,74 @@ function BtUI._autoReconnectOnDrop(plugin)
     return true
 end
 
+-- ── Disconnect events ────────────────────────────────────────────────
+-- Polling for a drop starts a dbus-send process every few seconds.
+-- KOReader's Kobo plugin (kobo.koplugin) already runs one dbus-monitor
+-- for Bluetooth property changes and lets other code subscribe; its
+-- Connected=false arrives the moment the headset drops (measured: same
+-- second, 2 s before the 5 s poll). When that monitor is running, listen
+-- to it and keep only a slow safety poll.
+BtUI.EVENT_SAFETY_POLL_S = 60
+local EVENT_KEY = "audiobook:bt_watch"
+
+local function koboDbusMonitor(plugin)
+    local ui = plugin and plugin.ui
+    local kp = ui and ui.kobo_plugin
+    local kb = kp and kp.kobo_bluetooth
+    local mon = kb and kb.dbus_monitor
+    if not (mon and mon.registerCallback and mon.unregisterCallback) then return nil end
+    if mon.isActive and not mon:isActive() then return nil end
+    return mon
+end
+
+--- The headset went away: hand it to auto reconnect, or tell the user.
+function BtUI._handleDrop(plugin)
+    local name = plugin:getSetting("bt_device_name", nil)
+    if BtUI._autoReconnectOnDrop(plugin) then
+        -- handled: paused, reconnecting, resumes on its own
+        logger.dbg("BtUI: drop handed to auto reconnect")
+    elseif plugin:getSetting("bt_disconnect_check", 30) ~= 0 then
+        UIManager:show(InfoMessage:new{
+            text = name
+                and T(_("Bluetooth audio device %1 disconnected."), name)
+                or _("Bluetooth audio device disconnected."),
+            timeout = 4,
+        })
+    end
+end
+
+function BtUI._onConnectedEvent(plugin, address, props)
+    if not (plugin._bt_disconnect_watching and props and props.Connected ~= nil) then
+        return
+    end
+    local saved = plugin:getSetting("bt_device_addr", nil)
+    if saved and address and saved:upper() ~= address:upper() then return end
+    if props.Connected == false then
+        if plugin._bt_last_connected ~= false then
+            plugin._bt_last_connected = false
+            logger.warn("BtUI: disconnect event for", address)
+            -- Off the monitor's dispatch: pausing and reconnecting do I/O.
+            UIManager:nextTick(function()
+                if plugin._bt_disconnect_watching then BtUI._handleDrop(plugin) end
+            end)
+        end
+    else
+        plugin._bt_last_connected = true
+    end
+end
+
 --- Watcher interval: the alert setting, tightened while auto reconnect is
---- on so a drop is caught within seconds. 0 means the watcher is off.
+--- on so a drop is caught within seconds. With disconnect events it is
+--- only a safety net. 0 means the watcher is off.
 local function watcherInterval(plugin)
     local interval = plugin:getSetting("bt_disconnect_check", 30)
     if BtUI.autoReconnectEnabled(plugin) then
         if interval == 0 or interval > BtUI.AUTO_RECONNECT_POLL_S then
             interval = BtUI.AUTO_RECONNECT_POLL_S
         end
+    end
+    if interval > 0 and plugin._bt_event_mon then
+        interval = math.max(interval, BtUI.EVENT_SAFETY_POLL_S)
     end
     return interval
 end
@@ -688,16 +748,37 @@ function BtUI.startWatcher(plugin)
     end
     plugin._bt_disconnect_watching = true
     plugin._bt_last_connected = nil
+    local mon = koboDbusMonitor(plugin)
+    if mon then
+        mon:registerCallback(EVENT_KEY, function(address, props)
+            BtUI._onConnectedEvent(plugin, address, props)
+        end, 60)
+        plugin._bt_event_mon = mon
+        logger.warn("BtUI: watching disconnect events from the Kobo plugin;",
+            "safety poll every", BtUI.EVENT_SAFETY_POLL_S, "s")
+    end
     BtUI._scheduleBTDisconnectCheck(plugin)
 end
 
 function BtUI.stopWatcher(plugin)
     plugin._bt_disconnect_watching = false
+    if plugin._bt_event_mon then
+        pcall(plugin._bt_event_mon.unregisterCallback, plugin._bt_event_mon, EVENT_KEY)
+        plugin._bt_event_mon = nil
+    end
 end
 
 function BtUI._scheduleBTDisconnectCheck(plugin)
     if not plugin._bt_disconnect_watching then
         return
+    end
+    -- If the Kobo plugin's monitor stopped (Bluetooth turned off and on),
+    -- drop the stale subscription so the fast poll takes over.
+    if plugin._bt_event_mon and plugin._bt_event_mon.isActive
+            and not plugin._bt_event_mon:isActive() then
+        pcall(plugin._bt_event_mon.unregisterCallback, plugin._bt_event_mon, EVENT_KEY)
+        plugin._bt_event_mon = nil
+        logger.warn("BtUI: Kobo plugin monitor stopped; polling instead")
     end
     -- Check at a coarse interval to keep overhead and wakeups low.
     local interval = watcherInterval(plugin)
@@ -724,18 +805,7 @@ function BtUI._scheduleBTDisconnectCheck(plugin)
             end
         elseif plugin._bt_last_connected and not any_connected then
             plugin._bt_last_connected = any_connected
-            local name = plugin:getSetting("bt_device_name", nil)
-            if BtUI._autoReconnectOnDrop(plugin) then
-                -- handled: paused, reconnecting, resumes on its own
-                logger.dbg("BtUI: drop handed to auto reconnect")
-            elseif plugin:getSetting("bt_disconnect_check", 30) ~= 0 then
-                UIManager:show(InfoMessage:new{
-                    text = name
-                        and T(_("Bluetooth audio device %1 disconnected."), name)
-                        or _("Bluetooth audio device disconnected."),
-                    timeout = 4,
-                })
-            end
+            BtUI._handleDrop(plugin)
         else
             plugin._bt_last_connected = any_connected
         end
