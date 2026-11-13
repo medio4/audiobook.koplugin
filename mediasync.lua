@@ -922,6 +922,9 @@ function MediaSync:stop(keep_chapter_menu, opts)
         and self.plugin and self.plugin._saveCurrentAlignedProgress then
         pcall(function() self.plugin:_saveCurrentAlignedProgress() end)
     end
+    if not track_transition and self.plugin and self.plugin._flushSmilXPointerCache then
+        pcall(self.plugin._flushSmilXPointerCache, self.plugin)
+    end
     self.state = self.STATE.STOPPED
     self._chain_generation = self._chain_generation + 1
 

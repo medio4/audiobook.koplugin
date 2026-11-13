@@ -4190,6 +4190,7 @@ function Audiobook:onSuspend()
     if self.session_recorder then
         pcall(function() self.session_recorder:stop() end)
     end
+    pcall(self._flushSmilXPointerCache, self)
     if not self._init_ok then return end
     -- Android: Suspend fires when KOReader is merely sent to the background
     -- (home button, app switch, screen off).  There is no hardware sleep to
@@ -4556,6 +4557,7 @@ end
 
 function Audiobook:onCloseDocument()
     logger.warn("Audiobook: onCloseDocument event received")
+    pcall(self._flushSmilXPointerCache, self)
     -- Re-assert the overlay inset into the sidecar before ReaderConfig writes
     -- copt_* (SaveSettings fires before CloseDocument, so this only covers
     -- paths that bypassed it). Dropping chrome must not restore the original
@@ -4861,22 +4863,143 @@ function Audiobook:_smilXPointerCacheKey(doc_path, text_doc, fragment_id)
     return doc_path .. "|" .. fragment_key
 end
 
+-- ── Per-book xpointer cache files ─────────────────────────────────────
+-- The cache used to live in KOReader's settings (smil_xpointer_cache).
+-- One book's worth is thousands of entries: on a Kobo it grew to 853 KB of
+-- an 899 KB settings.reader.lua, and every settings flush (closing the
+-- player, a volume tap, KOReader's own saves) rewrote all of it, 1.2-1.9 s
+-- each time. Each book now gets cache/xpointers/<hash>.bin (LuaJIT
+-- string.buffer); the settings copy is migrated out on first use. Without
+-- string.buffer the settings copy is used as before.
+local XP_FILE_VERSION = 1
+
+local function xpStringBuffer()
+    local ok, sb = pcall(require, "string.buffer")
+    return ok and sb or nil
+end
+
+local function xpHash(str)
+    local hash = 5381
+    for i = 1, #str do
+        hash = (hash * 33 + str:byte(i)) % 4294967296
+    end
+    return string.format("%08x", hash)
+end
+
+function Audiobook:_xpCacheFile(doc_path)
+    if not (doc_path and PLUGIN_PATH and xpStringBuffer()) then return nil end
+    return PLUGIN_PATH .. "cache/xpointers/" .. xpHash(doc_path) .. ".bin"
+end
+
+local function xpReadFile(path)
+    local sb = xpStringBuffer()
+    local f = sb and path and io.open(path, "rb")
+    if not f then return nil end
+    local blob = f:read("*a")
+    f:close()
+    local ok, t = pcall(sb.decode, blob)
+    if ok and type(t) == "table" and t.version == XP_FILE_VERSION
+            and type(t.entries) == "table" then
+        return t
+    end
+    return nil
+end
+
+local function xpWriteFile(path, doc_path, entries)
+    local sb = xpStringBuffer()
+    if not (sb and path) then return false end
+    local dir = path:match("^(.*)/")
+    os.execute("mkdir -p '" .. dir:gsub("'", "'\\''") .. "'")
+    local ok, blob = pcall(sb.encode, {
+        version = XP_FILE_VERSION, doc_path = doc_path, entries = entries })
+    if not ok then return false end
+    local f = io.open(path .. ".tmp", "wb")
+    if not f then return false end
+    f:write(blob)
+    f:close()
+    return os.rename(path .. ".tmp", path) and true or false
+end
+
+--- Move every book's cache out of KOReader's settings into its own file.
+--- Runs once per session; afterwards the settings key is gone.
+function Audiobook:_migrateSmilXPointerSettings()
+    if self._xp_migrated then return end
+    self._xp_migrated = true
+    if not xpStringBuffer() then return end
+    local all = self:getSetting("smil_xpointer_cache", nil)
+    if type(all) ~= "table" or not next(all) then return end
+    local moved, kept = 0, {}
+    for doc_path, entries in pairs(all) do
+        local path = self:_xpCacheFile(doc_path)
+        local merged = {}
+        local existing = xpReadFile(path)
+        for k, v in pairs(entries) do merged[k] = v end
+        if existing then
+            for k, v in pairs(existing.entries) do merged[k] = v end
+        end
+        if xpWriteFile(path, doc_path, merged) then
+            moved = moved + 1
+        else
+            kept[doc_path] = entries
+        end
+    end
+    -- Drop the moved books from settings. No flush here: KOReader's next
+    -- save writes the (now small) file anyway.
+    self:setSetting("smil_xpointer_cache", next(kept) and kept or nil, true)
+    logger.warn("Audiobook: moved SMIL xpointer cache of", moved,
+        "book(s) out of settings into cache/xpointers")
+end
+
 -- Load the persisted xpointer cache for the current EPUB.
 function Audiobook:_loadSmilXPointerCache(doc_path)
     if not doc_path then return {} end
-    local all = self:getSetting("smil_xpointer_cache", {})
-    local book_cache = all[doc_path] or {}
+    pcall(self._migrateSmilXPointerSettings, self)
     local copy = {}
-    for k, v in pairs(book_cache) do
-        copy[k] = v
+    local path = self:_xpCacheFile(doc_path)
+    local stored = path and xpReadFile(path)
+    if stored then
+        for k, v in pairs(stored.entries) do copy[k] = v end
+    else
+        local all = self:getSetting("smil_xpointer_cache", {})
+        for k, v in pairs(all[doc_path] or {}) do copy[k] = v end
     end
-    logger.warn("Audiobook: loaded", self:_countTable(copy), "SMIL xpointer entries for", doc_path:match("([^/]+)$"))
+    logger.warn("Audiobook: loaded", self:_countTable(copy), "SMIL xpointer entries for",
+        doc_path:match("([^/]+)$"), path and "(file)" or "(settings)")
     return copy
+end
+
+--- Write a pending xpointer cache to its file now (stop, suspend, close).
+function Audiobook:_flushSmilXPointerCache()
+    local p = self._xp_pending
+    if not p then return end
+    self._xp_pending = nil
+    if self._xp_timer then
+        UIManager:unschedule(self._xp_timer)
+        self._xp_timer = nil
+    end
+    local ok = xpWriteFile(p.path, p.doc_path, p.cache)
+    logger.dbg("Audiobook: wrote xpointer cache file", p.path, ok)
 end
 
 -- Save the in-memory xpointer cache back to KOReader settings.
 function Audiobook:_saveSmilXPointerCache(doc_path, cache)
     if not doc_path or not cache then return end
+    local path = self:_xpCacheFile(doc_path)
+    if path then
+        -- A new entry arrives every few seconds of narration: write once
+        -- 15 s after the last one, and on stop / suspend / close.
+        if self._xp_pending and self._xp_pending.path ~= path then
+            self:_flushSmilXPointerCache()
+        end
+        self._xp_pending = { path = path, doc_path = doc_path, cache = cache }
+        if self._xp_timer then UIManager:unschedule(self._xp_timer) end
+        self._xp_timer = function()
+            self._xp_timer = nil
+            self:_flushSmilXPointerCache()
+        end
+        UIManager:scheduleIn(15, self._xp_timer)
+        return
+    end
     local all = self:getSetting("smil_xpointer_cache", {})
     all[doc_path] = cache
     -- No flush: this runs for every newly resolved sentence during
