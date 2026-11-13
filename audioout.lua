@@ -198,10 +198,14 @@ function AudioOut:play(path, opts)
     }, 8000)
 end
 
-function AudioOut:pause() return self:_command({ cmd = "pause" }) end
+function AudioOut:pause()
+    self._status_cache = nil
+    return self:_command({ cmd = "pause" })
+end
 -- resume with pos_ms (external mode) re-epochs the daemon's clock at that
 -- position instead of the legacy byte-derived rebaseline.
 function AudioOut:resume(pos_ms)
+    self._status_cache = nil
     if pos_ms then
         return self:_command({ cmd = "resume", pos_ms = pos_ms })
     end
@@ -259,6 +263,7 @@ end
 -- pos_ms. The caller respawns its feeder after this returns. total_ms
 -- updates the completion target.
 function AudioOut:seek(pos_ms, total_ms)
+    self._status_cache = nil
     return self:_command({ cmd = "seek", pos_ms = pos_ms,
                            total_ms = total_ms }, 8000)
 end
@@ -273,8 +278,28 @@ end
 function AudioOut:setVolume(v)
     return self:_command({ cmd = "volume", value_x1000 = math.floor(v * 1000 + 0.5) })
 end
+-- Several UI timers poll the position (measured: ~16 socket round trips a
+-- second, each blocking the UI thread). Answers younger than 50 ms are
+-- reused (50 ms of position error is far below a word).
 function AudioOut:status(timeout_ms)
-    return self:_command({ cmd = "status" }, timeout_ms)
+    local now
+    local ok_t, tv = pcall(function()
+        local t = ffi.new("struct timeval")
+        ffi.C.gettimeofday(t, nil)
+        return tonumber(t.tv_sec) * 1000 + tonumber(t.tv_usec) / 1000
+    end)
+    if ok_t then now = tv end
+    local c = self._status_cache
+    if now and c and now - c.at < 50 and now >= c.at then
+        return c.st
+    end
+    local st, err = self:_command({ cmd = "status" }, timeout_ms)
+    if st and now then
+        self._status_cache = { st = st, at = now }
+    else
+        self._status_cache = nil
+    end
+    return st, err
 end
 function AudioOut:takeEvent()
     local e = self._last_event
