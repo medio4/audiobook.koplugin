@@ -679,8 +679,18 @@ local function koboDbusMonitor(plugin)
     local kp = ui and ui.kobo_plugin
     local kb = kp and kp.kobo_bluetooth
     local mon = kb and kb.dbus_monitor
-    if not (mon and mon.registerCallback and mon.unregisterCallback) then return nil end
-    if mon.isActive and not mon:isActive() then return nil end
+    local why
+    if not ui then why = "no ui"
+    elseif not kp then why = "no ui.kobo_plugin"
+    elseif not kb then why = "no kobo_bluetooth"
+    elseif not mon then why = "no dbus_monitor"
+    elseif not (mon.registerCallback and mon.unregisterCallback) then why = "no callback API"
+    elseif mon.isActive and not mon:isActive() then why = "monitor not active"
+    end
+    if why then
+        logger.warn("BtUI: no Kobo plugin disconnect events (" .. why .. "); polling")
+        return nil
+    end
     return mon
 end
 
@@ -744,10 +754,12 @@ function BtUI.startWatcher(plugin)
         return  -- user disabled the alert and auto reconnect
     end
     if plugin._bt_disconnect_watching then
+        logger.dbg("BtUI: watcher already running")
         return
     end
     plugin._bt_disconnect_watching = true
     plugin._bt_last_connected = nil
+    logger.warn("BtUI: disconnect watcher starting")
     local mon = koboDbusMonitor(plugin)
     if mon then
         mon:registerCallback(EVENT_KEY, function(address, props)
