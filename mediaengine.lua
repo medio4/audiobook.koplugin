@@ -3332,11 +3332,15 @@ function MediaEngine:stop()
     if self._audioout_external then
         self:_killAudiooutFeeder()
         if self._audioout_client then
-            self._audioout_client:stop()
             -- MTK: a stopped daemon does not answer the next externalStart
             -- (9 s stall, then respawn). Release it so every start is fresh.
+            -- Kill it straight away: a graceful "stop" first made the UI
+            -- wait for the sink teardown it was about to kill anyway (the
+            -- long-pause release has always killed without it).
             if self._use_persistent_pipeline then
                 self._audioout_client:killDaemon()
+            else
+                self._audioout_client:stop()
             end
         end
         self._audioout_external = false
