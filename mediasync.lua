@@ -1595,7 +1595,17 @@ function MediaSync:_entryPage(idx)
     local key = (e.text_doc and e.text_doc ~= "" and e.text_doc .. "#" .. e.fragment_id)
         or ("#" .. e.fragment_id)
     local xp = self._xpointer_cache[key]
-    if not xp then return nil end
+    if not xp then
+        -- Not heard yet (lines ahead of the narration usually are not):
+        -- resolve it the way the highlighter does and keep the result.
+        local hm = self.highlight_manager
+        local cid = (hm and hm._toCrengineId and hm:_toCrengineId(e.fragment_id, e.text_doc))
+            or e.fragment_id
+        local ok_n, norm = pcall(ui.document.getNormalizedXPointer, ui.document, "#" .. cid)
+        if not (ok_n and norm and norm ~= false) then return nil end
+        xp = norm
+        self:_cacheXPointer(e.text_doc, e.fragment_id, xp)
+    end
     local ok, page = pcall(ui.document.getPageFromXPointer, ui.document, xp)
     return ok and tonumber(page) or nil
 end
