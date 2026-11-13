@@ -3050,14 +3050,29 @@ function MediaEngine:pause()
         self:_killAudiooutFeeder()
         self._audioout_client:pause()
         if self._use_persistent_pipeline then
-            -- MTK sink: a paused daemon cannot restart its stream (the resume
-            -- rebuild never reaches PLAYING, so resume is silent). Release the
-            -- daemon and the sink; resume() starts a fresh daemon here.
-            self._audioout_client:killDaemon()
-            self._audioout_external = false
-            self._audioout_ext_dec = nil
-            self._audioout_released_on_pause = true
-            logger.warn("MediaEngine: paused audioout: daemon released at", self._paused_position)
+            local ao = self._audioout_client
+            if ao.isSoft and ao:isSoft() then
+                -- Soft daemon: it feeds silence while paused, so the sink
+                -- and the headset link stay up and resume is instant. Only
+                -- a long pause gives the link back (battery, standby).
+                local gen = self.play_generation
+                local hold = self.PAUSE_LINK_HOLD_S or 180
+                self._pause_release_token = (self._pause_release_token or 0) + 1
+                local token = self._pause_release_token
+                UIManager:scheduleIn(hold, function()
+                    if self._pause_release_token == token
+                            and self.play_generation == gen then
+                        self:releasePausedOutput("long pause")
+                    end
+                end)
+                logger.warn("MediaEngine: paused audioout (link held) at", self._paused_position)
+                return
+            end
+            -- MTK sink, old daemon: a paused daemon cannot restart its
+            -- stream (the resume rebuild never reaches PLAYING, so resume is
+            -- silent). Release the daemon and the sink; resume() starts a
+            -- fresh daemon here.
+            self:releasePausedOutput("pause")
             return
         end
         logger.warn("MediaEngine: paused audioout external stream")
@@ -3131,8 +3146,26 @@ function MediaEngine:pause()
     end
 end
 
+--- While paused on the MTK path: give the sink and the Bluetooth link back
+--- (daemon killed). resume() then starts a fresh daemon at the paused
+--- position. Called for long pauses and before the device suspends.
+function MediaEngine:releasePausedOutput(reason)
+    if not (self.is_playing and self.is_paused) then return end
+    if not (self._use_persistent_pipeline and self._audioout_external
+            and self._audioout_client) then return end
+    self._pause_release_token = (self._pause_release_token or 0) + 1
+    self:_killAudiooutFeeder()
+    self._audioout_client:killDaemon()
+    self._audioout_external = false
+    self._audioout_ext_dec = nil
+    self._audioout_released_on_pause = true
+    logger.warn("MediaEngine: paused audioout: daemon released at",
+        self._paused_position, "reason=", reason)
+end
+
 function MediaEngine:resume()
     if not self.is_playing or not self.is_paused then return end
+    self._pause_release_token = (self._pause_release_token or 0) + 1
 
     if self._audioout_released_on_pause then
         self._audioout_released_on_pause = nil

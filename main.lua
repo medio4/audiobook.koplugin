@@ -4191,6 +4191,14 @@ function Audiobook:onSuspend()
     if self.media_sync and (self.media_sync:isPlaying() or self.media_sync:isPaused()) then
         self._media_was_playing = self.media_sync:isPlaying()
         pcall(function() self.media_sync:pause() end)
+        -- The device is going to sleep and Bluetooth goes off with it:
+        -- do not hold the audio sink open across the suspend.
+        pcall(function()
+            local eng = self.media_sync.media_engine
+            if eng and eng.releasePausedOutput then
+                eng:releasePausedOutput("suspend")
+            end
+        end)
         self._paused_by_suspend = true
         logger.warn("Audiobook: Suspend — paused media playback")
         return
