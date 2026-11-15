@@ -1191,19 +1191,52 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
                     },
                     {
-                        text = _("Floating player outside the book"),
-                        checked_func = function()
-                            return self:getSetting("floating_player", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("floating_player", false)
-                        end,
-                        help_text = _("Keep a read-along playing when you leave its book. A small player floats at the bottom of the library and other screens; tap it for line skip, open the book, stop or hide. Reopening the book takes the narration back into the page. Off by default."),
-                    },
-                    {
-                        text = _("Show the floating player"),
-                        enabled_func = function() return detachedAlive() ~= nil end,
-                        callback = function() Audiobook._showFloating(true) end,
+                        text = _("Floating player"),
+                        sub_item_table = {
+                            {
+                                text = _("Enable"),
+                                checked_func = function()
+                                    return self:getSetting("floating_enabled", true)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("floating_enabled", true)
+                                end,
+                                help_text = _("Turns both kinds of floating player below on or off. On by default."),
+                                separator = true,
+                            },
+                            {
+                                text = _("Appear when leaving the book"),
+                                enabled_func = function()
+                                    return self:getSetting("floating_enabled", true)
+                                end,
+                                checked_func = function()
+                                    return self:getSetting("floating_player", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("floating_player", false)
+                                end,
+                                help_text = _("Keep a read-along playing when you leave its book (Home, or opening the library). A small player floats at the bottom of the library and other screens; tap it for line skip, open the book, stop or hide. Reopening the book takes the narration back into the page. Off by default."),
+                            },
+                            {
+                                text = _("Appear over in-book menus"),
+                                enabled_func = function()
+                                    return self:getSetting("floating_enabled", true)
+                                end,
+                                checked_func = function()
+                                    return self:getSetting("bar_over_menus", true)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("bar_over_menus", true)
+                                end,
+                                help_text = _("Keep the player bar on top of menus, lists and dialogs opened from the book. While one is open, hold an empty part of the bar and drag it to move it out of the way; it keeps that spot for menus and goes back to its place on the page. On by default."),
+                                separator = true,
+                            },
+                            {
+                                text = _("Show the floating player"),
+                                enabled_func = function() return detachedAlive() ~= nil end,
+                                callback = function() Audiobook._showFloating(true) end,
+                            },
+                        },
                     },
                     {
                         text = _("Line-by-line view in the full-screen player"),
@@ -4675,7 +4708,10 @@ end
 --- stopping it, when the setting is on and something is playing or paused.
 -- @treturn bool true when the session was detached
 function Audiobook:_detachToFloating()
-    if not self:getSetting("floating_player", false) then return false end
+    if not (self:getSetting("floating_enabled", true)
+            and self:getSetting("floating_player", false)) then
+        return false
+    end
     local ms = self.media_sync
     if not (ms and ms.overlay_mode and (ms.state == "playing" or ms.state == "paused")) then
         return false

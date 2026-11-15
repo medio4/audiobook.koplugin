@@ -2860,6 +2860,12 @@ end
 --- a new non-modal widget.  Only the minimized bar of a book still open.
 function AudiobookPlayer:_keepOnTop()
     if not (self.visible and self._minimized) or self.suppressed then return end
+    -- Settings: Floating player > Enable / Appear over in-book menus.
+    local p = self.plugin
+    if p and p.getSetting and not (p:getSetting("floating_enabled", true)
+            and p:getSetting("bar_over_menus", true)) then
+        return
+    end
     local stack = UIManager._window_stack
     if not stack then return end
     local idx, has_ui
