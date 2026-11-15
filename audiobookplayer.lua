@@ -2283,6 +2283,7 @@ function AudiobookPlayer:show()
     -- If setupUI already minimized us (read-along mode), keep it minimized
     -- and avoid a disruptive full-screen flash.
     UIManager:show(self, self._minimized and "ui" or "full")
+    self:_claimTop()
     if self.tts_mode then
         self._tts_info_active = true
         self:_scheduleTtsInfo()
@@ -2290,6 +2291,7 @@ function AudiobookPlayer:show()
 end
 
 function AudiobookPlayer:hide()
+    self:_releaseTop()
     self.visible = false
     self._minimized = false
     -- Stop the TTS context cycler so it does not keep a timer alive (and
@@ -2687,11 +2689,13 @@ end
 
 -- Deliver a gesture the bar did not consume: first to any widgets stacked
 -- between this bar and the reader (a ButtonDialog shown at read-aloud
--- start, say), then to the reader.  KOReader's own dispatcher only hands
--- unconsumed gestures to *active* sub-widgets of lower widgets, so without
--- this pass a plain dialog between us and ReaderUI would never see a tap.
+-- start, or a menu the bar was raised over), then to the reader.
+-- KOReader's own dispatcher only hands unconsumed gestures to *active*
+-- sub-widgets of lower widgets, so without this pass a plain dialog
+-- between us and ReaderUI would never see a tap.  A full-screen or modal
+-- widget ends the walk (bar the always-active ones, as KOReader does), so
+-- a tap a contents list ignores never turns a page behind it.
 function AudiobookPlayer:_dispatchGestureBelow(event)
-    local UIManager = require("ui/uimanager")
     local stack = UIManager._window_stack
     local below = {}
     local seen_self = false
@@ -2704,15 +2708,94 @@ function AudiobookPlayer:_dispatchGestureBelow(event)
             seen_self = true
         end
     end
+    local blocked = false
     for _, w in ipairs(below) do
-        if w.handleEvent and w:handleEvent(event) then
-            return true
+        if not blocked or w.is_always_active then
+            if w.handleEvent and w:handleEvent(event) then
+                return true
+            end
+        elseif w.active_widgets then
+            for _, aw in ipairs(w.active_widgets) do
+                if aw:handleEvent(event) then return true end
+            end
         end
+        if w.covers_fullscreen or w.modal then blocked = true end
     end
-    if self.ui_widget then
-        return self.ui_widget:handleEvent(event)
+    local ui = self.ui_widget
+    if not ui then return false end
+    if not blocked then
+        return ui:handleEvent(event)
+    end
+    for _, aw in ipairs(ui.active_widgets or {}) do
+        if aw:handleEvent(event) then return true end
     end
     return false
+end
+
+-- ── Stay above screens opened from the book ──────────────────────────────
+-- Menus, lists and dialogs opened while the bar is up used to cover it.
+-- UIManager.show is wrapped once (the hook survives plugin reloads, which
+-- re-run this file, by looking the bar up on UIManager) and lifts the
+-- minimized bar back to the top after every new screen.  Never above:
+-- toasts and modals (UIManager's own order), the on-screen keyboard (it
+-- sits where the bar is) and the sleep screen.
+local STAY_BELOW = { VirtualKeyboard = true, ScreenSaver = true, ScreenSaverLock = true }
+
+local function installTopHook()
+    if UIManager._audiobook_top_hook then return end
+    local orig_show = UIManager.show
+    UIManager._audiobook_top_hook = true
+    UIManager.show = function(um, widget, ...)
+        local r = orig_show(um, widget, ...)
+        local bar = rawget(UIManager, "_audiobook_top_bar")
+        if bar and widget ~= bar and type(widget) == "table" and not widget.toast then
+            local ok, err = pcall(bar._keepOnTop, bar)
+            if not ok then logger.warn("AudiobookPlayer: keep on top failed:", err) end
+        end
+        return r
+    end
+end
+
+function AudiobookPlayer:_claimTop()
+    installTopHook()
+    UIManager._audiobook_top_bar = self
+end
+
+function AudiobookPlayer:_releaseTop()
+    if rawget(UIManager, "_audiobook_top_bar") == self then
+        UIManager._audiobook_top_bar = nil
+    end
+end
+
+--- Move this bar's window to the top of the stack, where UIManager would put
+--- a new non-modal widget.  Only the minimized bar of a book still open.
+function AudiobookPlayer:_keepOnTop()
+    if not (self.visible and self._minimized) or self.suppressed then return end
+    local stack = UIManager._window_stack
+    if not stack then return end
+    local idx, has_ui
+    for i = 1, #stack do
+        local w = stack[i].widget
+        if w == self then idx = i end
+        if w == self.ui_widget then has_ui = true end
+        if w and STAY_BELOW[w.name] then return end
+    end
+    if not (idx and has_ui) then return end
+    local window = table.remove(stack, idx)
+    local pos = 1
+    for i = #stack, 0, -1 do
+        local top = stack[i]
+        if not (top and top.widget.toast) then
+            if not top or not top.widget.modal then
+                pos = i + 1
+                break
+            end
+        end
+    end
+    table.insert(stack, pos, window)
+    if pos ~= idx then
+        UIManager:setDirty(self, "ui")
+    end
 end
 
 function AudiobookPlayer:_isTapOnWidget(pos, widget)
@@ -2807,11 +2890,13 @@ function AudiobookPlayer:onSetDimensions(size, rotation_mode)
     -- Re-show at the correct position — this registers the new x,y with
     -- UIManager so paintTo receives the right coordinates.
     UIManager:show(self, "ui")
+    self:_claimTop()
     UIManager:setDirty(self, "ui")
     return true
 end
 
 function AudiobookPlayer:onCloseWidget()
+    self:_releaseTop()
     -- Dismiss the speed picker if the player is closed while it is open.
     if self._speed_dialog then
         UIManager:close(self._speed_dialog)
