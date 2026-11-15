@@ -177,6 +177,21 @@ function Audiobook:init()
     -- while audio is playing (when the user enables the setting).
     self:_installSleepCoverOverride()
 
+    -- Hold menu on a book: built-in audiobook or text-to-speech (settings
+    -- under "When holding a book", off by default). The library registers
+    -- the buttons; the reader starts TTS when they asked for it.
+    local oc_ok, oc_err = pcall(function()
+        local OpenChoice = dofile(PLUGIN_PATH .. "openchoice.lua")
+        if self.ui and self.ui.document then
+            OpenChoice.checkPendingTts(self)
+        elseif self.ui and self.ui.addFileDialogButtons then
+            -- Library: its file_chooser does not exist yet (plugins are
+            -- created before FileManager:setupLayout).
+            OpenChoice.registerButtons(self, _)
+        end
+    end)
+    if not oc_ok then logger.warn("Audiobook: hold-menu buttons failed:", oc_err) end
+
     -- If the user chose "Play aligned/enriched audiobook" from the browser,
     -- the FileManager plugin instance stored a pending request before ReaderUI
     -- loaded. Handle it now that we have a document.
@@ -1152,6 +1167,31 @@ function Audiobook:addToMainMenu(menu_items)
                             self:toggleSetting("sleep_timer_suspend_device", false)
                         end,
                         help_text = _("When enabled, the device will suspend after the sleep timer stops playback."),
+                    },
+                    {
+                        text = _("When holding a book"),
+                        sub_item_table = {
+                            {
+                                text = _("Audiobook or text-to-speech buttons"),
+                                checked_func = function()
+                                    return self:getSetting("open_choice_narrated", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("open_choice_narrated", false)
+                                end,
+                                help_text = _("Holding a book with a built-in audiobook (its cover or its row in the library) shows Play audiobook and Read aloud (TTS) in its menu. Off by default."),
+                            },
+                            {
+                                text = _("Text-to-speech button for books without audio"),
+                                checked_func = function()
+                                    return self:getSetting("open_choice_tts_only", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("open_choice_tts_only", false)
+                                end,
+                                help_text = _("Holding a book with no built-in audiobook shows Read aloud (TTS) in its menu. Off by default."),
+                            },
+                        },
                     },
                     {
                         text_func = function()
