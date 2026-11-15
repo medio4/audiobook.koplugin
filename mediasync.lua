@@ -646,6 +646,132 @@ function MediaSync:_cacheXPointer(text_doc, fragment_id, full_xpointer)
     end
 end
 
+-- ── Chapter window: pre-resolve around the narration, trim far away ───
+-- Jumps (resume, refocus, page-follow into another chapter, hold-by-page)
+-- are fast only when the target line's xpointer is cached; a miss takes
+-- the slow path. crengine holds the whole EPUB as one document, so a line
+-- in another chapter resolves without turning to it. When the narration
+-- enters a chapter, resolve every line of the previous, current and next
+-- chapter in small batches; when the cache is over its cap, drop the
+-- chapters furthest from the narration first.
+MediaSync.PREFETCH_BATCH = 20
+MediaSync.PREFETCH_TICK_S = 0.15
+MediaSync.XP_CACHE_MAX_DEFAULT = 3000
+
+--- Chapter order of the whole book (narrative order of text_doc), built
+--- from the plugin's full SMIL timing and rebuilt when that changes.
+function MediaSync:_chapterIndex()
+    local all = self.plugin and self.plugin._smil_timing_data
+    if not all then return nil end
+    local ci = self._chap_index
+    if ci and ci.src == all then return ci end
+    -- Another book (Storyteller reuses names like text/part0027.html):
+    -- the window has to be computed afresh.
+    self._prefetch_doc = nil
+    ci = { src = all, docs = {}, pos = {}, frags = {} }
+    for _, e in ipairs(all) do
+        local d = e.text_doc
+        if d and e.fragment_id then
+            if not ci.pos[d] then
+                table.insert(ci.docs, d)
+                ci.pos[d] = #ci.docs
+                ci.frags[d] = {}
+            end
+            table.insert(ci.frags[d], e.fragment_id)
+        end
+    end
+    self._chap_index = ci
+    return ci
+end
+
+--- Narration entered text_doc: queue the uncached lines of the chapters
+--- around it and resolve them in the background.
+function MediaSync:_prefetchAround(text_doc)
+    if not text_doc then return end
+    local ci = self:_chapterIndex()     -- may reset _prefetch_doc (new book)
+    if text_doc == self._prefetch_doc then return end
+    self._prefetch_doc = text_doc
+    local ui = self.plugin and self.plugin.ui
+    local hm = self.highlight_manager
+    if not (ci and ci.pos[text_doc] and ui and ui.document and hm
+            and hm._resolveFragmentXPointer) then return end
+    self._xpointer_cache = self._xpointer_cache or {}
+    local p = ci.pos[text_doc]
+    local queue = {}
+    for _, i in ipairs({ p, p + 1, p - 1 }) do
+        local d = ci.docs[i]
+        for _, frag in ipairs(d and ci.frags[d] or {}) do
+            if not self._xpointer_cache[d .. "#" .. frag] then
+                table.insert(queue, { d, frag })
+            end
+        end
+    end
+    self._prefetch_gen = (self._prefetch_gen or 0) + 1
+    if #queue == 0 then return end
+    local gen, n, done, started = self._prefetch_gen, #queue, 0, os.clock()
+    logger.warn("MediaSync: pre-resolving", n, "lines around", text_doc)
+    local function step()
+        if self._prefetch_gen ~= gen or self.state == self.STATE.STOPPED then return end
+        for _ = 1, self.PREFETCH_BATCH do
+            done = done + 1
+            local q = queue[done]
+            if not q then break end
+            local ok, xp = pcall(hm._resolveFragmentXPointer, hm, ui.document, q[2], q[1])
+            if ok and xp then self._xpointer_cache[q[1] .. "#" .. q[2]] = xp end
+        end
+        if done < n then
+            UIManager:scheduleIn(self.PREFETCH_TICK_S, step)
+            return
+        end
+        logger.warn("MediaSync: pre-resolved", n, "lines in",
+            string.format("%.2f", os.clock() - started), "s CPU")
+        local doc_path = self.plugin and self.plugin._smil_doc_path
+        if doc_path and self.plugin._saveSmilXPointerCache then
+            self.plugin:_saveSmilXPointerCache(doc_path, self._xpointer_cache)
+        end
+    end
+    UIManager:scheduleIn(self.PREFETCH_TICK_S, step)
+end
+
+--- Keep cache (the table being saved) under the cap: drop whole chapters,
+--- furthest from the narration's chapter first. Never drops the window.
+function MediaSync:_trimXPointerCache(cache)
+    if type(cache) ~= "table" then return end
+    local cap = (self.plugin and self.plugin.getSetting
+        and self.plugin:getSetting("smil_cache_max_entries", self.XP_CACHE_MAX_DEFAULT))
+        or self.XP_CACHE_MAX_DEFAULT
+    local total, by_doc = 0, {}
+    for k in pairs(cache) do
+        total = total + 1
+        local d = k:match("^(.*)#") or ""
+        by_doc[d] = (by_doc[d] or 0) + 1
+    end
+    if total <= cap then return end
+    local ci = self:_chapterIndex()
+    local here = ci and self._prefetch_doc and ci.pos[self._prefetch_doc]
+    local order = {}
+    for d in pairs(by_doc) do
+        local p = ci and ci.pos[d]
+        -- Unknown chapters (stale keys) go first, then by distance.
+        local dist = (p and here) and math.abs(p - here) or math.huge
+        table.insert(order, { d = d, dist = dist })
+    end
+    table.sort(order, function(a, b) return a.dist > b.dist end)
+    local dropped = 0
+    for _, o in ipairs(order) do
+        if total <= cap or o.dist <= 1 then break end
+        for k in pairs(cache) do
+            if (k:match("^(.*)#") or "") == o.d then cache[k] = nil end
+        end
+        total = total - by_doc[o.d]
+        dropped = dropped + by_doc[o.d]
+    end
+    if dropped > 0 then
+        logger.warn("MediaSync: trimmed xpointer cache by", dropped,
+            "entries (furthest chapters first), kept", total)
+    end
+end
+
 -- Cache the current document's resolved xpointer for a fragment if it is
 -- currently reachable.  This is called after a successful highlight so that
 -- resume/refocus can later jump back to this fragment using a full internal
@@ -2112,6 +2238,10 @@ function MediaSync:_updateHighlightAtTime(pos)
         self._current_word_idx = 1
         self._hl_fail_count = 0
         self._hl_retry_at = nil
+        -- New chapter: pre-resolve the chapters around it (no-op otherwise).
+        if sentence.text_doc then
+            pcall(self._prefetchAround, self, sentence.text_doc)
+        end
         -- Full-screen player's optional line-by-line view.
         local bar = self.playback_bar
         if bar and bar.lines_mode and bar.setLines then
