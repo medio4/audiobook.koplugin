@@ -1166,7 +1166,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("large_mini_bar", false)
                         end,
-                        help_text = _("A taller read-along bar with bigger buttons that are easier to hit. Applies the next time playback starts."),
+                        help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
                     },
                     {
                         text = _("Line-by-line view in the full-screen player"),
