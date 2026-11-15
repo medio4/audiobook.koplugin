@@ -874,10 +874,69 @@ local function watcherInterval(plugin)
     return interval
 end
 
+-- ── Bluetooth scans by other plugins ────────────────────────────────
+-- On the MTK stack a device scan (StartDiscovery) during playback breaks
+-- the A2DP stream: the sink keeps accepting audio, the clock keeps
+-- moving, nothing is heard, and pause/resume does not bring it back; only
+-- a fresh audioout daemon does. ZenOS's Bluetooth menu scans when opened
+-- (log 2026-11-14 22:03:26). Wrap its startScan so that when a scan that
+-- began during playback ends, the output is rebuilt at the current
+-- position (about a second of gap instead of silence).
+local ZEN_BT_MODULE = "modules/menu/bluetooth/kobo_bluetooth"
+
+--- Rebuild the audio output after a scan: fresh daemon at the position.
+function BtUI._refreshAudioAfterScan(plugin)
+    local ms = plugin.media_sync
+    local eng = ms and ms.media_engine
+    if not (ms and eng and eng.releasePausedOutput) then return end
+    if ms.state == "playing" then
+        logger.warn("BtUI: Bluetooth scan ended during playback; rebuilding audio output")
+        plugin:pauseReadAlong()
+        pcall(eng.releasePausedOutput, eng, "bt scan")
+        plugin:resumeReadAlong()
+    elseif ms.state == "paused" then
+        -- Resume will start a fresh daemon.
+        logger.warn("BtUI: Bluetooth scan while paused; output released for resume")
+        pcall(eng.releasePausedOutput, eng, "bt scan")
+    end
+end
+
+function BtUI._hookZenScan(plugin)
+    local M = package.loaded[ZEN_BT_MODULE]
+    if type(M) ~= "table" or type(M.startScan) ~= "function" then return false end
+    if M._readalong_orig_startScan then
+        M._readalong_plugin = plugin
+        return true
+    end
+    M._readalong_orig_startScan = M.startScan
+    M._readalong_plugin = plugin
+    M.startScan = function(done, ...)
+        local p = M._readalong_plugin
+        local ms = p and p.media_sync
+        local during = ms and (ms.state == "playing" or ms.state == "paused")
+        if during then
+            logger.warn("BtUI: ZenOS started a Bluetooth scan during playback")
+        end
+        -- done runs whenever the scan ends: timeout, cancel or failure.
+        local function wrapped(...)
+            if done then done(...) end
+            if during and p then
+                UIManager:scheduleIn(0.5, function()
+                    pcall(BtUI._refreshAudioAfterScan, p)
+                end)
+            end
+        end
+        return M._readalong_orig_startScan(wrapped, ...)
+    end
+    logger.warn("BtUI: watching ZenOS Bluetooth scans")
+    return true
+end
+
 function BtUI.startWatcher(plugin)
     -- On Kindle, we can't enumerate BT devices via BlueZ, so the
     -- disconnect watcher would always report "no devices". Skip it.
     if plugin.bt_manager:getStackType() == "kindle" then return end
+    pcall(BtUI._hookZenScan, plugin)
     if watcherInterval(plugin) == 0 then
         return  -- user disabled the alert and auto reconnect
     end
