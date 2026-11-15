@@ -168,6 +168,16 @@ function Audiobook:init()
     -- while audio is playing (when the user enables the setting).
     self:_installSleepCoverOverride()
 
+    -- Optional question on open: built-in audiobook or text-to-speech.
+    -- Runs before _checkPendingAlignedStart, which clears the browser's
+    -- "Play aligned/enriched audiobook" request this needs to see.
+    if self.ui and self.ui.document then
+        pcall(function()
+            local OpenChoice = dofile(PLUGIN_PATH .. "openchoice.lua")
+            OpenChoice.maybeOffer(self, _)
+        end)
+    end
+
     -- If the user chose "Play aligned/enriched audiobook" from the browser,
     -- the FileManager plugin instance stored a pending request before ReaderUI
     -- loaded. Handle it now that we have a document.
