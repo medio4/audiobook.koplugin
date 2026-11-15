@@ -258,6 +258,10 @@ function AudiobookPlayer:init()
     self.covers_footer = not self:_shouldSitAboveFooter()
     self._return_hint_active = false
     self._rotation_mode = Screen:getRotationMode()
+    -- Where the user dragged the bar over menus (fraction of screen height).
+    if self.plugin and self.plugin.getSetting then
+        self._menu_y_pct = tonumber(self.plugin:getSetting("bar_menu_y_pct", nil))
+    end
     self:setupUI()
 end
 
@@ -971,8 +975,64 @@ function AudiobookPlayer:_statusBarInset()
     return Screen:scaleBySize(36)
 end
 
-function AudiobookPlayer:_miniBarY()
+--- The bar's own slot: the book's margins leave room for it here.
+function AudiobookPlayer:_dockedBarY()
     return self.height - self._mini_height - self:_statusBarInset()
+end
+
+--- Where the bar sits.  On the book page always in its slot (the text is
+--- laid out around it); while a menu or list from the book is under it,
+--- wherever the user last dragged it (bar_menu_y_pct), else the slot.
+function AudiobookPlayer:_miniBarY()
+    local pct = self._menu_y_pct
+    if pct and self._minimized and self:_menuOver() then
+        local y = math.floor(pct * self.height + 0.5)
+        return math.max(0, math.min(y, self.height - self._mini_height))
+    end
+    return self:_dockedBarY()
+end
+
+--- True when a menu, list or dialog lies between this bar and the book.
+function AudiobookPlayer:_menuOver()
+    local stack = UIManager._window_stack
+    if not (stack and self.ui_widget) then return false end
+    local seen_self = false
+    for j = #stack, 1, -1 do
+        local w = stack[j].widget
+        if seen_self then
+            if w == self.ui_widget then return false end
+            if not w.toast and not w._plugin_chrome then return true end
+        elseif w == self then
+            seen_self = true
+        end
+    end
+    return false
+end
+
+--- Follow a menu opening or closing: move dimen and repaint both places.
+function AudiobookPlayer:_syncPosition()
+    if not (self.visible and self._minimized) then return end
+    local y = self:_miniBarY()
+    if self.dimen.y == y then return end
+    local old = Geom:new{ x = 0, y = self.dimen.y, w = self.width, h = self._mini_height }
+    self.dimen.y = y
+    local new = Geom:new{ x = 0, y = y, w = self.width, h = self._mini_height }
+    UIManager:setDirty("all", function() return "ui", old:combine(new) end)
+end
+
+--- End of a hold-and-drag: the bar keeps the offset at which it was grabbed.
+function AudiobookPlayer:_finishMove(finger_y)
+    local grab = self._moving and self._moving.grab or 0
+    self._moving = nil
+    self:_closeHint()
+    local y = math.max(0, math.min(finger_y - grab, self.height - self._mini_height))
+    self._menu_y_pct = y / self.height
+    if self.plugin and self.plugin.setSetting then
+        -- No flush: KOReader writes the settings on suspend and exit.
+        self.plugin:setSetting("bar_menu_y_pct", self._menu_y_pct, true)
+    end
+    logger.warn("AudiobookPlayer: bar moved over menus to y=", y)
+    self:_syncPosition()
 end
 
 function AudiobookPlayer:_applyMinimizedGeometry()
@@ -2373,6 +2433,16 @@ function AudiobookPlayer:handleEvent(event)
             if ges and self.plugin and self.plugin.session_recorder then
                 self.plugin.session_recorder:recordGesture(ges, "audiobookplayer")
             end
+            -- Moving the bar: everything up to the lift is ours.
+            if ges and self._moving then
+                if ges.ges == "hold_release" and ges.pos then
+                    self:_finishMove(ges.pos.y)
+                    return true
+                end
+                if ges.ges == "hold_pan" then return true end
+                self._moving = nil
+                self:_closeHint()
+            end
             if ges and ges.pos then
                 local mini_y = self:_miniBarY()
                 local on_bar = ges.pos.y >= mini_y
@@ -2392,6 +2462,14 @@ function AudiobookPlayer:handleEvent(event)
                         self.on_skip_page(1)
                         return true
                     end
+                end
+                -- Hold anywhere else on the bar while a menu is open: drag
+                -- it out of the way, lift to place.  Only then: on the
+                -- book page the text is laid out around the bar's slot.
+                if on_bar and ges.ges == "hold" and self:_menuOver() then
+                    self._moving = { grab = ges.pos.y - mini_y }
+                    self:_showHint(_("Drag the bar, lift to place it"))
+                    return true
                 end
                 if on_bar and is_double then
                     for _i, b in pairs{ self._mini_sync_minus, self._mini_sync_plus,
@@ -2754,6 +2832,17 @@ local function installTopHook()
         end
         return r
     end
+    -- A screen closing may put the bar back in its slot (see _miniBarY).
+    local orig_close = UIManager.close
+    UIManager.close = function(um, widget, ...)
+        local r = orig_close(um, widget, ...)
+        local bar = rawget(UIManager, "_audiobook_top_bar")
+        if bar and widget ~= bar and type(widget) == "table" and not widget.toast then
+            local ok, err = pcall(bar._syncPosition, bar)
+            if not ok then logger.warn("AudiobookPlayer: bar position failed:", err) end
+        end
+        return r
+    end
 end
 
 function AudiobookPlayer:_claimTop()
@@ -2796,6 +2885,7 @@ function AudiobookPlayer:_keepOnTop()
     if pos ~= idx then
         UIManager:setDirty(self, "ui")
     end
+    self:_syncPosition()
 end
 
 function AudiobookPlayer:_isTapOnWidget(pos, widget)
@@ -2897,6 +2987,8 @@ end
 
 function AudiobookPlayer:onCloseWidget()
     self:_releaseTop()
+    self._moving = nil
+    self:_closeHint()
     -- Dismiss the speed picker if the player is closed while it is open.
     if self._speed_dialog then
         UIManager:close(self._speed_dialog)
@@ -2939,7 +3031,7 @@ function AudiobookPlayer:_showSyncOverlay(offset_ms)
         }
         local size = frame:getSize()
         local x = math.floor((self.width - size.w) / 2)
-        local y = math.max(0, self:_miniBarY() - size.h - Screen:scaleBySize(12))
+        local y = self:_toastY(size.h)
         self._sync_overlay = frame
         self._sync_overlay_rect = Geom:new{ x = x, y = y, w = size.w, h = size.h }
         UIManager:show(frame, "fast", self._sync_overlay_rect, x, y)
@@ -2949,6 +3041,49 @@ function AudiobookPlayer:_showSyncOverlay(offset_ms)
     end
     self._sync_overlay_timer = function() self:_closeSyncOverlay() end
     UIManager:scheduleIn(SYNC_OVERLAY_SECONDS, self._sync_overlay_timer)
+end
+
+--- A toast just above the bar, or just below it when the bar is at the top.
+function AudiobookPlayer:_toastY(h)
+    local gap = Screen:scaleBySize(12)
+    local bar_y = self:_miniBarY()
+    if bar_y - h - gap >= 0 then return bar_y - h - gap end
+    return math.min(bar_y + self._mini_height + gap, self.height - h)
+end
+
+--- A short instruction near the bar until _closeHint (or 4 s).
+function AudiobookPlayer:_showHint(text)
+    self:_closeHint()
+    local frame = FrameContainer:new{
+        toast = true,
+        _plugin_chrome = true,
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = Size.border.thick,
+        radius = Screen:scaleBySize(10),
+        padding = Size.padding.large,
+        padding_left = Size.padding.large * 2,
+        padding_right = Size.padding.large * 2,
+        TextWidget:new{ text = text, face = Font:getFace("cfont", 22) },
+    }
+    local size = frame:getSize()
+    local x = math.floor((self.width - size.w) / 2)
+    local y = self:_toastY(size.h)
+    self._hint = frame
+    self._hint_rect = Geom:new{ x = x, y = y, w = size.w, h = size.h }
+    UIManager:show(frame, "fast", self._hint_rect, x, y)
+    self._hint_timer = function() self:_closeHint() end
+    UIManager:scheduleIn(4, self._hint_timer)
+end
+
+function AudiobookPlayer:_closeHint()
+    if self._hint_timer then
+        UIManager:unschedule(self._hint_timer)
+        self._hint_timer = nil
+    end
+    if self._hint then
+        UIManager:close(self._hint, "ui", self._hint_rect)
+        self._hint = nil
+    end
 end
 
 function AudiobookPlayer:_closeSyncOverlay()
