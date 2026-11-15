@@ -171,14 +171,17 @@ function Audiobook:init()
     -- Hold menu on a book: built-in audiobook or text-to-speech (settings
     -- under "When holding a book", off by default). The library registers
     -- the buttons; the reader starts TTS when they asked for it.
-    pcall(function()
+    local oc_ok, oc_err = pcall(function()
         local OpenChoice = dofile(PLUGIN_PATH .. "openchoice.lua")
         if self.ui and self.ui.document then
             OpenChoice.checkPendingTts(self)
-        elseif self.ui and self.ui.file_chooser then
+        elseif self.ui and self.ui.addFileDialogButtons then
+            -- Library: its file_chooser does not exist yet (plugins are
+            -- created before FileManager:setupLayout).
             OpenChoice.registerButtons(self, _)
         end
     end)
+    if not oc_ok then logger.warn("Audiobook: hold-menu buttons failed:", oc_err) end
 
     -- If the user chose "Play aligned/enriched audiobook" from the browser,
     -- the FileManager plugin instance stored a pending request before ReaderUI

@@ -136,6 +136,7 @@ function OpenChoice.registerButtons(plugin, _)
     FileManager._audiobook_open_choice = state
     state.plugin, state.fm, state.gettext = plugin, fm, _
 
+    logger.info("Audiobook: hold-menu buttons registered")
     fm:addFileDialogButtons("audiobook_open_choice", function(file, is_file)
         if state.in_zen then return nil end -- already on ZenOS's first page
         return buildRow(plugin, fm, file, is_file, _)
