@@ -461,12 +461,17 @@ end
 -- and when the user has turned the advisory off, so every caller can invoke it
 -- without repeating those conditions.
 --
+-- With auto reconnect on, connect to the saved headset instead of asking;
+-- the dialog then only appears when that gives up (force = true).
+--
 -- @tparam table plugin  Audiobook widget container
--- @treturn bool  True when the dialog was shown
-function BtUI._showBtSilentDialog(plugin)
+-- @tparam bool force  Show the dialog even when auto connect could run
+-- @treturn bool  True when the dialog was shown (or auto connect took over)
+function BtUI._showBtSilentDialog(plugin, force)
     local bt = plugin and plugin.bt_manager
     if not bt then return false end
     if bt:getStackType() == "kindle" then return false end
+    if not force and BtUI._autoConnectAtStart(plugin) then return true end
     -- bt_disconnect_check is the existing off switch for Bluetooth advisories,
     -- reused here so there is one setting rather than two.
     if plugin:getSetting("bt_disconnect_check", 30) == 0 then return false end
@@ -558,6 +563,120 @@ end
 --- The headset dropped while a book was playing: pause, reconnect, resume.
 --- Media playback only; the read-aloud (TTS) path keeps the old message.
 -- @treturn bool true when the auto reconnect took over
+--- Shared reconnect loop: scan in the background while the headset is not
+--- visible (no UI freeze), connect once it is (or on a scheduled retry),
+--- and report back once the link has been up on two checks 3 s apart.
+-- opts.still_wanted(): false aborts quietly.
+-- opts.on_back(elapsed_s): link confirmed.
+-- opts.on_give_up(elapsed_s): not back within AUTO_RECONNECT_GIVE_UP_S.
+-- opts.power_on: turn Bluetooth on first if it is off.
+-- opts.message: shown with a Cancel button while the loop runs.
+-- opts.on_cancel(): the user tapped Cancel (the loop and scan stop).
+function BtUI._connectLoop(plugin, address, opts)
+    local bt = plugin.bt_manager
+    local started = UIManager:getTime()
+    local tick, up_count = 0, 0
+    local scanning = false
+    local cancelled = false
+    local dialog
+    local function stop_scan()
+        if scanning then
+            scanning = false
+            pcall(bt.stopDiscovery, bt)
+        end
+    end
+    local function close_dialog()
+        if dialog then
+            UIManager:close(dialog)
+            dialog = nil
+        end
+    end
+    local wanted = opts.still_wanted
+    opts.still_wanted = function() return not cancelled and wanted() end
+    local on_back, on_give_up = opts.on_back, opts.on_give_up
+    opts.on_back = function(s) close_dialog(); on_back(s) end
+    opts.on_give_up = function(s) close_dialog(); on_give_up(s) end
+    if opts.message then
+        local ButtonDialog = require("ui/widget/buttondialog")
+        dialog = ButtonDialog:new{
+            title = opts.message,
+            buttons = {{{
+                text = _("Cancel"),
+                callback = function()
+                    cancelled = true
+                    close_dialog()
+                    stop_scan()
+                    logger.warn("BtUI: reconnect cancelled by the user")
+                    if opts.on_cancel then opts.on_cancel() end
+                end,
+            }}},
+        }
+        UIManager:show(dialog)
+    end
+    local function elapsed()
+        return require("ui/time").to_s(UIManager:getTime() - started)
+    end
+    local function step()
+        if not opts.still_wanted() then
+            stop_scan()
+            close_dialog()
+            if not cancelled then
+                logger.warn("BtUI: reconnect cancelled (state changed)")
+            end
+            return
+        end
+        tick = tick + 1
+        if tick == 1 and opts.power_on then
+            local okp, powered = pcall(bt.isPowered, bt)
+            if okp and not powered then
+                logger.warn("BtUI: Bluetooth is off; turning it on to connect")
+                pcall(bt.powerOn, bt)
+                if not opts.still_wanted() then close_dialog() return end
+            end
+        end
+        local known = true
+        if bt.deviceKnown then
+            local okk, k = pcall(bt.deviceKnown, bt, address)
+            known = okk and k
+        end
+        if not known then
+            if not scanning then
+                scanning = pcall(bt.startDiscovery, bt)
+                logger.warn("BtUI: headset not visible; scanning in the background")
+            end
+        elseif scanning or BtUI.AUTO_RECONNECT_CONNECT_TICKS[tick] then
+            -- Just reappeared (or a scheduled retry): connect now.
+            stop_scan()
+            pcall(bt.connect, bt, address)
+            if not opts.still_wanted() then close_dialog() return end
+        end
+        pcall(bt.clearAudioDeviceCache, bt)
+        local ok, up = pcall(bt.anyAudioDeviceConnected, bt)
+        -- Need the link up on two checks in a row: right after going into
+        -- the case the link can flap, and resuming into it drops again.
+        if ok and up then up_count = up_count + 1 else up_count = 0 end
+        if up_count == 1 then
+            logger.warn("BtUI: headset link up; confirming")
+        end
+        if up_count >= 2 then
+            stop_scan()
+            logger.warn("BtUI: headset back after", elapsed(), "s")
+            plugin._bt_last_connected = true
+            plugin._bt_silent_warned = nil
+            opts.on_back(elapsed())
+            return
+        end
+        if elapsed() >= BtUI.AUTO_RECONNECT_GIVE_UP_S then
+            stop_scan()
+            logger.warn("BtUI: reconnect gave up after", elapsed(), "s")
+            opts.on_give_up(elapsed())
+            return
+        end
+        UIManager:scheduleIn(3, step)
+    end
+    UIManager:scheduleIn(1, step)
+end
+
 function BtUI._autoReconnectOnDrop(plugin)
     if not BtUI.autoReconnectEnabled(plugin) then return false end
     if not mediaPlaying(plugin) then return false end
@@ -577,70 +696,20 @@ function BtUI._autoReconnectOnDrop(plugin)
     plugin._bt_auto_reconnect_token = (plugin._bt_auto_reconnect_token or 0) + 1
     local token = plugin._bt_auto_reconnect_token
     logger.warn("BtUI: headset dropped while playing; auto reconnect", address)
-    UIManager:show(InfoMessage:new{
-        text = name and T(_("%1 disconnected. Paused, reconnecting..."), name)
-            or _("Headset disconnected. Paused, reconnecting..."),
-        timeout = 3,
-    })
-
-    local started = UIManager:getTime()
-    local tick = 0
-    local up_count = 0
-    -- MTK forgets a disconnected device. Scan in the background (no UI
-    -- freeze) and only call connect once the device is visible again.
-    local scanning = false
-    local function stop_scan()
-        if scanning then
-            scanning = false
-            pcall(bt.stopDiscovery, bt)
-        end
-    end
     local function still_ours()
         -- Abort if the user resumed, stopped, or a newer drop took over.
         return plugin._bt_auto_reconnect_token == token
             and plugin.media_sync and plugin.media_sync.state == "paused"
     end
-    local function step()
-        if not still_ours() then
-            stop_scan()
-            logger.warn("BtUI: auto reconnect cancelled (state changed)")
-            return
-        end
-        tick = tick + 1
-        local known = true
-        if bt.deviceKnown then
-            local okk, k = pcall(bt.deviceKnown, bt, address)
-            known = okk and k
-        end
-        if not known then
-            if not scanning then
-                local oks = pcall(bt.startDiscovery, bt)
-                scanning = oks
-                logger.warn("BtUI: headset not visible; scanning in the background")
-            end
-        elseif scanning or BtUI.AUTO_RECONNECT_CONNECT_TICKS[tick] then
-            -- Just reappeared (or a scheduled retry): connect now.
-            stop_scan()
-            pcall(bt.connect, bt, address)
-            if not still_ours() then return end
-        end
-        pcall(bt.clearAudioDeviceCache, bt)
-        local ok, up = pcall(bt.anyAudioDeviceConnected, bt)
-        -- Need the link up on two checks in a row: right after going into
-        -- the case the link can flap, and resuming into it drops again.
-        if ok and up then up_count = up_count + 1 else up_count = 0 end
-        if up_count == 1 then
-            logger.warn("BtUI: headset link up; confirming before resuming")
-        end
-        if up_count >= 2 then
-            stop_scan()
-            local elapsed = require("ui/time").to_s(UIManager:getTime() - started)
-            logger.warn("BtUI: headset back after", elapsed, "s; resuming")
+    BtUI._connectLoop(plugin, address, {
+        message = name and T(_("%1 disconnected. Paused, reconnecting..."), name)
+            or _("Headset disconnected. Paused, reconnecting..."),
+        -- Cancel: stay paused; play resumes on whatever is connected then.
+        still_wanted = still_ours,
+        on_back = function()
             -- The link was already confirmed 3 s apart; A2DP is up behind it.
             UIManager:scheduleIn(0.5, function()
                 if not still_ours() then return end
-                plugin._bt_last_connected = true
-                plugin._bt_silent_warned = nil
                 plugin:resumeReadAlong()
                 UIManager:show(InfoMessage:new{
                     text = name and T(_("%1 reconnected. Resuming."), name)
@@ -648,19 +717,61 @@ function BtUI._autoReconnectOnDrop(plugin)
                     timeout = 2,
                 })
             end)
-            return
-        end
-        local elapsed = require("ui/time").to_s(UIManager:getTime() - started)
-        if elapsed >= BtUI.AUTO_RECONNECT_GIVE_UP_S then
-            stop_scan()
-            logger.warn("BtUI: auto reconnect gave up after", elapsed, "s")
+        end,
+        on_give_up = function()
             plugin._bt_silent_warned = nil
-            BtUI._showBtSilentDialog(plugin)
-            return
-        end
-        UIManager:scheduleIn(3, step)
+            BtUI._showBtSilentDialog(plugin, true)
+        end,
+    })
+    return true
+end
+
+--- Play was pressed with the saved headset not connected: connect to it
+--- (turning Bluetooth on if needed) instead of asking. MediaEngine is
+--- already holding the position and starts by itself once a device
+--- connects (_startBtReattachWatcher). The Reconnect prompt only appears
+--- if this gives up.
+-- @treturn bool true when the auto connect took over
+function BtUI._autoConnectAtStart(plugin)
+    if not BtUI.autoReconnectEnabled(plugin) then return false end
+    local bt = plugin.bt_manager
+    local address = plugin:getSetting("bt_device_addr", nil)
+    if not bt or not address then return false end
+    if plugin._bt_auto_connecting then return true end
+    plugin._bt_auto_connecting = true
+    local name = plugin:getSetting("bt_device_name", nil)
+    logger.warn("BtUI: headset not connected at play; connecting", address)
+    local function wanted()
+        local ms = plugin.media_sync
+        return ms ~= nil and ms.state ~= "stopped"
     end
-    UIManager:scheduleIn(1, step)
+    BtUI._connectLoop(plugin, address, {
+        power_on = true,
+        message = name and T(_("Connecting to %1..."), name) or _("Connecting to the headset..."),
+        -- Cancel: pause, so playback does not start by itself if the
+        -- headset turns up later; play tries again.
+        on_cancel = function()
+            plugin._bt_auto_connecting = nil
+            pcall(plugin.pauseReadAlong, plugin)
+        end,
+        still_wanted = function()
+            if wanted() then return true end
+            plugin._bt_auto_connecting = nil
+            return false
+        end,
+        on_back = function()
+            plugin._bt_auto_connecting = nil
+            UIManager:show(InfoMessage:new{
+                text = name and T(_("Connected to %1."), name) or _("Connected."),
+                timeout = 2,
+            })
+        end,
+        on_give_up = function()
+            plugin._bt_auto_connecting = nil
+            plugin._bt_silent_warned = nil
+            BtUI._showBtSilentDialog(plugin, true)
+        end,
+    })
     return true
 end
 
@@ -674,7 +785,7 @@ end
 BtUI.EVENT_SAFETY_POLL_S = 60
 local EVENT_KEY = "audiobook:bt_watch"
 
-local function koboDbusMonitor(plugin)
+local function koboDbusMonitor(plugin, quiet)
     local ui = plugin and plugin.ui
     -- PluginLoader names a plugin after its folder (kobo.koplugin -> "kobo");
     -- the "kobo_plugin" in its source is ignored for that.
@@ -690,10 +801,25 @@ local function koboDbusMonitor(plugin)
     elseif mon.isActive and not mon:isActive() then why = "monitor not active"
     end
     if why then
-        logger.warn("BtUI: no Kobo plugin disconnect events (" .. why .. "); polling")
+        if not quiet then
+            logger.warn("BtUI: no Kobo plugin disconnect events (" .. why .. "); polling")
+        end
         return nil
     end
     return mon
+end
+
+--- Subscribe to the Kobo plugin's disconnect events if its monitor runs.
+function BtUI._subscribeEvents(plugin, quiet)
+    local mon = koboDbusMonitor(plugin, quiet)
+    if not mon then return false end
+    mon:registerCallback(EVENT_KEY, function(address, props)
+        BtUI._onConnectedEvent(plugin, address, props)
+    end, 60)
+    plugin._bt_event_mon = mon
+    logger.warn("BtUI: watching disconnect events from the Kobo plugin;",
+        "safety poll every", BtUI.EVENT_SAFETY_POLL_S, "s")
+    return true
 end
 
 --- The headset went away: hand it to auto reconnect, or tell the user.
@@ -762,15 +888,7 @@ function BtUI.startWatcher(plugin)
     plugin._bt_disconnect_watching = true
     plugin._bt_last_connected = nil
     logger.warn("BtUI: disconnect watcher starting")
-    local mon = koboDbusMonitor(plugin)
-    if mon then
-        mon:registerCallback(EVENT_KEY, function(address, props)
-            BtUI._onConnectedEvent(plugin, address, props)
-        end, 60)
-        plugin._bt_event_mon = mon
-        logger.warn("BtUI: watching disconnect events from the Kobo plugin;",
-            "safety poll every", BtUI.EVENT_SAFETY_POLL_S, "s")
-    end
+    BtUI._subscribeEvents(plugin)
     BtUI._scheduleBTDisconnectCheck(plugin)
 end
 
@@ -794,6 +912,9 @@ function BtUI._scheduleBTDisconnectCheck(plugin)
         plugin._bt_event_mon = nil
         logger.warn("BtUI: Kobo plugin monitor stopped; polling instead")
     end
+    -- Not subscribed (yet, or any more): the Kobo plugin restarts its
+    -- monitor when Bluetooth reconnects. Join it again once it runs.
+    if not plugin._bt_event_mon then BtUI._subscribeEvents(plugin, true) end
     -- Check at a coarse interval to keep overhead and wakeups low.
     local interval = watcherInterval(plugin)
     if interval == 0 then
