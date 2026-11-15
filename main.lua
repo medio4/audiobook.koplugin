@@ -35,6 +35,15 @@ local BtUI, BtMediaControl, BugReport, BenchmarkRunner, MenuBuilder, Utils, Upda
 local SessionRecorder
 local PLUGIN_PATH
 
+-- Floating player (setting floating_player): a read-along that keeps
+-- playing after its book is closed. The plugin module is loaded once and
+-- every KOReader screen makes its own Audiobook instance, so the session
+-- lives here, shared by all instances: { plugin = instance that owns it,
+-- ms = its MediaSync, doc_path, title }. FLOAT is the bubble widget.
+local DETACHED
+local FLOAT
+local detachedAlive  -- defined with the floating player functions below
+
 --- Plugin debug.log (included in bug reports). No book text. Never throws.
 local function dlog(...)
     local DL = package.loaded["audiobook_debuglog"]
@@ -416,6 +425,13 @@ function Audiobook:_initSubmodules()
         end
     end)
 
+    -- ── Floating player: a new screen opened over it, bring it back on top ──
+    pcall(function()
+        UIManager:scheduleIn(0.6, function()
+            if detachedAlive() and FLOAT then Audiobook._showFloating() end
+        end)
+    end)
+
     -- ── Self-cleaning audiobook cache, a minute after start ──
     -- Off the startup path; deletes only caches of books not open now.
     pcall(function()
@@ -500,6 +516,12 @@ function Audiobook:onDispatcherRegisterActions()
         event = "AudiobookStop",
         title = _("Stop Read-Along"),
         reader = true,
+    })
+    Dispatcher:registerAction("audiobook_floating_toggle", {
+        category = "none",
+        event = "AudiobookFloatingToggle",
+        title = _("Show / hide the floating Read-Along player"),
+        general = true,
     })
 end
 
@@ -1169,6 +1191,21 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
                     },
                     {
+                        text = _("Floating player outside the book"),
+                        checked_func = function()
+                            return self:getSetting("floating_player", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("floating_player", false)
+                        end,
+                        help_text = _("Keep a read-along playing when you leave its book. A small player floats at the bottom of the library and other screens; tap it for line skip, open the book, stop or hide. Reopening the book takes the narration back into the page. Off by default."),
+                    },
+                    {
+                        text = _("Show the floating player"),
+                        enabled_func = function() return detachedAlive() ~= nil end,
+                        callback = function() Audiobook._showFloating(true) end,
+                    },
+                    {
                         text = _("Line-by-line view in the full-screen player"),
                         checked_func = function()
                             return self:getSetting("player_line_view", false)
@@ -1370,6 +1407,7 @@ end
 
 function Audiobook:startReadAlong(text, start_pos, anchor_xp)
     if not self._init_ok then self:_showInitError(); return end
+    pcall(self._endDetachedFor, self, nil)   -- one audio output
     if not self:_audioOutputReady() then return end
     local page_text = text or self:getCurrentPageText()
     if not page_text or page_text == "" then
@@ -3829,6 +3867,9 @@ end
 
 -- Event handlers
 function Audiobook:onAudiobookToggle()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onAudiobookToggle() end
     if not self._init_ok then self:_showInitError(); return true end
     -- When media playback is active (no document needed), toggle that
     if self.media_sync and self.media_sync.state ~= "stopped" then
@@ -3852,6 +3893,9 @@ function Audiobook:onAudiobookToggle()
 end
 
 function Audiobook:onAudiobookStop()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onAudiobookStop() end
     if not self._init_ok then return true end
     logger.warn("Audiobook: onAudiobookStop event received")
     self:stopReadAlong()
@@ -3863,6 +3907,9 @@ end
 -- device sends key events (play/pause/next/prev from a BT headset).
 
 function Audiobook:onMediaPlayPause()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onMediaPlayPause() end
     if not self._init_ok then return true end
     -- Prefer media_sync (Storyteller / audiobook) over TTS sync_controller.
     local media_active = self.media_sync and self.media_sync.state ~= "stopped"
@@ -3883,18 +3930,27 @@ function Audiobook:onMediaPlayPause()
 end
 
 function Audiobook:onMediaPlay()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onMediaPlay() end
     if not self._init_ok then return true end
     self:resumeReadAlong()
     return true
 end
 
 function Audiobook:onMediaPause()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onMediaPause() end
     if not self._init_ok then return true end
     self:pauseReadAlong()
     return true
 end
 
 function Audiobook:onMediaStop()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onMediaStop() end
     if not self._init_ok then return true end
     logger.warn("Audiobook: onMediaStop event received")
     self:stopReadAlong()
@@ -3902,6 +3958,9 @@ function Audiobook:onMediaStop()
 end
 
 function Audiobook:onMediaNext()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onMediaNext() end
     if not self._init_ok then return true end
     if self.media_sync and self.media_sync.state ~= "stopped" then
         self.media_sync:nextChapter()
@@ -3914,6 +3973,9 @@ function Audiobook:onMediaNext()
 end
 
 function Audiobook:onMediaPrev()
+    -- Floating player: a closed book's read-along is the one playing.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then return detached_owner:onMediaPrev() end
     if not self._init_ok then return true end
     if self.media_sync and self.media_sync.state ~= "stopped" then
         self.media_sync:prevChapter()
@@ -4215,6 +4277,10 @@ function Audiobook:onSuspend()
         pcall(function() self.session_recorder:stop() end)
     end
     pcall(self._flushSmilXPointerCache, self)
+    -- Floating player: the closed book's owner is not in the widget tree,
+    -- so it does not get Suspend itself. Pause it and release the sink.
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then pcall(detached_owner.onSuspend, detached_owner) end
     if not self._init_ok then return end
     -- Android: Suspend fires when KOReader is merely sent to the background
     -- (home button, app switch, screen off).  There is no hardware sleep to
@@ -4261,6 +4327,8 @@ function Audiobook:onSuspend()
 end
 
 function Audiobook:onResume()
+    local detached_owner = self:_detachedTarget()
+    if detached_owner then pcall(detached_owner.onResume, detached_owner) end
     if not self._init_ok then return end
     if not self._paused_by_suspend then return end
     self._paused_by_suspend = false
@@ -4548,6 +4616,9 @@ end
 --- Pin the overlay mini-bar and restore the last sentence (highlighted,
 --- audio armed, not playing) so Play continues from there.
 function Audiobook:onReaderReady()
+    -- Floating player: reopening its book takes the narration back into
+    -- the page; another book keeps the bubble on top.
+    pcall(self._reattachFloating, self)
     if not self._init_ok or not self.media_sync then return end
     if not self:getSetting("keep_media_overlay_bar", false) then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
@@ -4579,6 +4650,167 @@ function Audiobook:_restoreAlignedOverlaySession()
     self:_startSmilPlayback(doc_path, nil, true, { prepare_only = true })
 end
 
+-- ── Floating player ──────────────────────────────────────────────────
+
+detachedAlive = function()
+    local s = DETACHED
+    if s and s.ms and s.ms.detached and s.ms.state ~= "stopped" then return s end
+    DETACHED = nil
+    return nil
+end
+
+local function floatTitle(s)
+    local ms = s.ms
+    local ch
+    pcall(function()
+        local c = ms:getCurrentChapter()
+        ch = c and c.title
+    end)
+    local book = s.doc_path and s.doc_path:match("([^/]+)%.[^./]+$")
+    if ch and ch ~= "" then return ch end
+    return book or _("Audiobook")
+end
+
+--- Book closing: keep the read-along playing (floating player) instead of
+--- stopping it, when the setting is on and something is playing or paused.
+-- @treturn bool true when the session was detached
+function Audiobook:_detachToFloating()
+    if not self:getSetting("floating_player", false) then return false end
+    local ms = self.media_sync
+    if not (ms and ms.overlay_mode and (ms.state == "playing" or ms.state == "paused")) then
+        return false
+    end
+    if ms.detached then return true end
+    pcall(self._saveCurrentAlignedProgress, self)
+    ms:detach()
+    DETACHED = { plugin = self, ms = ms, doc_path = self._smil_doc_path }
+    ms.on_play_state = function(playing)
+        if FLOAT then FLOAT:setPlaying(playing) end
+    end
+    ms.on_detached_stop = function()
+        DETACHED = nil
+        Audiobook._closeFloating()
+    end
+    logger.warn("Audiobook: book closed; read-along continues in the floating player")
+    -- Show it once the next screen is up, on top of it.
+    UIManager:scheduleIn(0.5, function() Audiobook._showFloating() end)
+    return true
+end
+
+function Audiobook._closeFloating()
+    if FLOAT then
+        UIManager:close(FLOAT)
+        FLOAT = nil
+    end
+end
+
+--- Show (or bring back to the top) the bubble for the detached session.
+function Audiobook._showFloating(force)
+    local s = detachedAlive()
+    if not s then Audiobook._closeFloating() return end
+    if s.hidden and not force then return end
+    s.hidden = nil
+    Audiobook._closeFloating()
+    local ok, FloatingPlayer = pcall(dofile, PLUGIN_PATH .. "floatingplayer.lua")
+    if not ok or not FloatingPlayer then
+        logger.warn("Audiobook: floating player failed to load:", FloatingPlayer)
+        return
+    end
+    local p = s.plugin
+    FLOAT = FloatingPlayer:new{
+        plugin_path = p.path,
+        title = floatTitle(s),
+        is_playing = s.ms.state == "playing",
+        on_play_pause = function()
+            if s.ms.state == "playing" then p:pauseReadAlong() else p:resumeReadAlong() end
+            if FLOAT then FLOAT:setTitle(floatTitle(s)) end
+        end,
+        on_skip_line = function(n) pcall(s.ms.skipLines, s.ms, n) end,
+        on_open_book = function() Audiobook._openDetachedBook() end,
+        on_stop = function() Audiobook._stopDetached() end,
+        on_hide = function()
+            s.hidden = true
+            Audiobook._closeFloating()
+            UIManager:show(InfoMessage:new{
+                text = _("Still playing. Show the player again from the Read-Along menu or your gesture."),
+                timeout = 3,
+            })
+        end,
+    }
+    UIManager:show(FLOAT, nil, nil, 0, 0)
+end
+
+function Audiobook._stopDetached()
+    local s = detachedAlive()
+    if s then
+        logger.warn("Audiobook: stopping the floating read-along")
+        pcall(s.plugin.stopReadAlong, s.plugin)
+    end
+    DETACHED = nil
+    Audiobook._closeFloating()
+end
+
+--- Open the detached book; its reader picks the session up (onReaderReady).
+function Audiobook._openDetachedBook()
+    local s = detachedAlive()
+    if not (s and s.doc_path) then return end
+    local ReaderUI = require("apps/reader/readerui")
+    ReaderUI:showReader(s.doc_path)
+end
+
+--- A reader opened: if it is the detached book, take the narration back
+--- into the page (highlights, bar) at the current position.
+function Audiobook:_reattachFloating()
+    local s = detachedAlive()
+    if not s or s.plugin == self then return end
+    local doc_path = self.ui and self.ui.document
+        and (self.ui.document.file_path or self.ui.document.file)
+    if doc_path ~= s.doc_path then
+        -- Another book: keep the bubble on top of it.
+        UIManager:scheduleIn(0.3, function() Audiobook._showFloating() end)
+        return
+    end
+    local was_playing = s.ms.state == "playing"
+    logger.warn("Audiobook: reopened the floating book; taking narration back into the page")
+    -- Stopping saves the narrated position; the restart resumes there.
+    Audiobook._stopDetached()
+    if was_playing then
+        UIManager:scheduleIn(0.8, function()
+            if self.ui and self.ui.document then
+                pcall(self._startSmilPlayback, self, doc_path, nil, true)
+            end
+        end)
+    end
+end
+
+--- New playback anywhere ends a detached session first (one audio sink).
+function Audiobook:_endDetachedFor(ms)
+    local s = detachedAlive()
+    if s and s.ms ~= ms then Audiobook._stopDetached() end
+end
+
+--- Controls that reach this instance while the detached session is the
+--- one playing (headset keys, gestures) go to the detached session.
+function Audiobook:_detachedTarget()
+    local own = self.media_sync
+    if own and own.state ~= "stopped" and not own.detached then return nil end
+    local s = detachedAlive()
+    if s and s.plugin ~= self then return s.plugin end
+    return nil
+end
+
+function Audiobook:onAudiobookFloatingToggle()
+    local s = detachedAlive()
+    if not s then return true end
+    if FLOAT then
+        s.hidden = true
+        Audiobook._closeFloating()
+    else
+        Audiobook._showFloating(true)
+    end
+    return true
+end
+
 function Audiobook:onCloseDocument()
     logger.warn("Audiobook: onCloseDocument event received")
     pcall(self._flushSmilXPointerCache, self)
@@ -4593,14 +4825,40 @@ function Audiobook:onCloseDocument()
     -- file browser fires CloseDocument, and the user expects the recording
     -- to persist across book changes. The recorder still stops on suspend,
     -- sleep-cover close, or explicit Stop.
+    -- Floating player: keep playing outside the book instead of stopping.
+    if self:_detachToFloating() then
+        self._audiobook_chrome_margins_applied = false
+        return
+    end
     self:stopReadAlong({ drop_chrome = true })
     self._audiobook_chrome_margins_applied = false
+end
+
+-- KOReader is quitting or restarting: a detached read-along must not
+-- outlive it (its audioout daemon is a separate process).
+function Audiobook:onExit()
+    pcall(Audiobook._stopDetached)
+end
+function Audiobook:onRestart()
+    pcall(Audiobook._stopDetached)
 end
 
 -- Safety net: if UIManager tears down the widget tree (exit, doc switch)
 -- without CloseDocument firing first, force-stop everything.
 function Audiobook:onCloseWidget()
     logger.warn("Audiobook: onCloseWidget event received")
+    -- The session that owns the floating player keeps playing: its screen
+    -- closing is exactly when the bubble takes over.
+    if self.media_sync and self.media_sync.detached then
+        self._audiobook_chrome_margins_applied = false
+        return
+    end
+    -- Reached without CloseDocument (no book in this screen): a playing
+    -- read-along from a book that is closing still gets the floating player.
+    if self:_detachToFloating() then
+        self._audiobook_chrome_margins_applied = false
+        return
+    end
     -- Do NOT stop the session recorder here for the same reason as above:
     -- widget teardown can happen when switching documents, and we want the
     -- recording to continue.
