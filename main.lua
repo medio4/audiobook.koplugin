@@ -1166,7 +1166,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("large_mini_bar", false)
                         end,
-                        help_text = _("A taller read-along bar with bigger buttons that are easier to hit. Applies the next time playback starts."),
+                        help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
                     },
                     {
                         text = _("Line-by-line view in the full-screen player"),
@@ -5008,14 +5008,35 @@ function Audiobook:_cleanupCaches()
     local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
     local dir = PLUGIN_PATH .. "cache/xpointers"
     if not (ok_lfs and lfs and lfs.attributes(dir, "mode") == "directory") then return end
+    local kept = {}
     for name in lfs.dir(dir) do
         if name:match("%.bin$") then
-            local t = xpReadFile(dir .. "/" .. name)
+            local path = dir .. "/" .. name
+            local t = xpReadFile(path)
             if t and t.doc_path and t.doc_path ~= keep
                     and lfs.attributes(t.doc_path, "mode") ~= "file" then
                 logger.warn("Audiobook: cache cleanup: xpointers for missing EPUB", t.doc_path)
-                os.remove(dir .. "/" .. name)
+                os.remove(path)
+            else
+                table.insert(kept, { path = path, is_keep = t and t.doc_path == keep,
+                    used = lfs.attributes(path, "modification") or 0 })
             end
+        end
+    end
+    -- At most smil_cache_max_books (6) books keep lookups; the least
+    -- recently written go first, never the open book.
+    local max_books = self:getSetting("smil_cache_max_books", 6)
+    table.sort(kept, function(a, b) return a.used > b.used end)
+    local n = 0
+    for _, k in ipairs(kept) do
+        if k.is_keep then
+            -- counted, never removed
+            n = n + 1
+        elseif n >= max_books then
+            logger.warn("Audiobook: cache cleanup: xpointers over the book limit", k.path)
+            os.remove(k.path)
+        else
+            n = n + 1
         end
     end
 end
@@ -5028,6 +5049,12 @@ function Audiobook:_flushSmilXPointerCache()
     if self._xp_timer then
         UIManager:unschedule(self._xp_timer)
         self._xp_timer = nil
+    end
+    -- Cap: drop the chapters furthest from the narration (in place; the
+    -- table is MediaSync's live cache).
+    local ms = self.media_sync
+    if ms and ms._trimXPointerCache and p.doc_path == self._smil_doc_path then
+        pcall(ms._trimXPointerCache, ms, p.cache)
     end
     local ok = xpWriteFile(p.path, p.doc_path, p.cache)
     logger.dbg("Audiobook: wrote xpointer cache file", p.path, ok)
