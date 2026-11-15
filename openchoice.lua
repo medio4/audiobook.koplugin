@@ -6,8 +6,8 @@ Read-Along's own text-to-speech.
 Both offers are off by default (settings "open_choice_narrated" and
 "open_choice_tts_only"). The buttons are added through KOReader's own
 FileManager:addFileDialogButtons, which feeds the hold menu of the stock
-library, History, Collections and file search, and ZenOS's context menu
-(under "More" while ZenOS's "Plugin actions" is on).
+library, History, Collections and file search. Under ZenOS they go on the first page of
+its context menu (see wrapZenChooser).
 --]]
 
 local UIManager = require("ui/uimanager")
@@ -55,46 +55,111 @@ local function openBook(path)
     end
 end
 
+--- The buttons for a held book, or nil when the settings or the book
+--- don't call for any.
+local function buildRow(plugin, fm, file, is_file, _)
+    if not is_file or not plugin._init_ok then return nil end
+    local want_narrated = plugin:getSetting("open_choice_narrated", false)
+    local want_tts_only = plugin:getSetting("open_choice_tts_only", false)
+    if not (want_narrated or want_tts_only) then return nil end
+    if not plugin:_isBookFile(file) then return nil end
+    local narrated = isNarrated(plugin, file)
+    if narrated and not want_narrated then return nil end
+    if not narrated and not want_tts_only then return nil end
+
+    local row = {}
+    if narrated then
+        table.insert(row, {
+            text = _("Play audiobook"),
+            callback = function()
+                closeHoldMenu()
+                logger.info("Audiobook: hold menu -> embedded audiobook", file)
+                local FileManager = require("apps/filemanager/filemanager")
+                plugin:_startAlignedPlaybackFromBrowserPath(FileManager.instance or fm, file)
+            end,
+        })
+    end
+    table.insert(row, {
+        text = _("Read aloud (TTS)"),
+        callback = function()
+            closeHoldMenu()
+            logger.info("Audiobook: hold menu -> TTS", file)
+            -- The FileManager instance is torn down when the reader
+            -- opens; the ReaderUI instance picks this up in its init.
+            getmetatable(plugin).__index._pending_tts_start = { path = file }
+            openBook(file)
+        end,
+    })
+    return row
+end
+
+--- ZenOS replaces the chooser's showFileDialog with its own context menu,
+--- where plugin buttons only show under "More" (and only with its Plugin
+--- actions option on). Put ours on the first page instead, through the
+--- item's _zen_extra_buttons, and keep them out of "More".
+local function wrapZenChooser(state, fc)
+    if not fc or fc._audiobook_open_choice_wrapped then return end
+    local orig = fc.showFileDialog
+    if type(orig) ~= "function" then return end
+    fc._audiobook_open_choice_wrapped = true
+    fc.showFileDialog = function(self_fc, item, ...)
+        local row
+        if type(item) == "table" and item.is_file and item.path then
+            pcall(function()
+                row = buildRow(state.plugin, state.fm, item.path, true, state.gettext)
+            end)
+        end
+        if row then
+            local extra = {}
+            for _i, r in ipairs(item._zen_extra_buttons or {}) do table.insert(extra, r) end
+            for _i, button in ipairs(row) do
+                button.align = "left"
+                table.insert(extra, { button })
+            end
+            item._zen_extra_buttons = extra
+        end
+        state.in_zen = true
+        local ok, res = pcall(orig, self_fc, item, ...)
+        state.in_zen = false
+        if not ok then error(res, 0) end
+        return res
+    end
+end
+
 --- Called from the FileManager instance's init.
 function OpenChoice.registerButtons(plugin, _)
     local fm = plugin.ui
     if not (fm and fm.addFileDialogButtons) then return end
-    fm:addFileDialogButtons("audiobook_open_choice", function(file, is_file)
-        if not is_file or not plugin._init_ok then return nil end
-        local want_narrated = plugin:getSetting("open_choice_narrated", false)
-        local want_tts_only = plugin:getSetting("open_choice_tts_only", false)
-        if not (want_narrated or want_tts_only) then return nil end
-        if not plugin:_isBookFile(file) then return nil end
-        local narrated = isNarrated(plugin, file)
-        if narrated and not want_narrated then return nil end
-        if not narrated and not want_tts_only then return nil end
+    local FileManager = require("apps/filemanager/filemanager")
+    -- Shared across FileManager instances (this file is dofile'd per init).
+    local state = FileManager._audiobook_open_choice or {}
+    FileManager._audiobook_open_choice = state
+    state.plugin, state.fm, state.gettext = plugin, fm, _
 
-        local row = {}
-        if narrated then
-            table.insert(row, {
-                text = _("Play audiobook"),
-                callback = function()
-                    closeHoldMenu()
-                    logger.info("Audiobook: hold menu -> embedded audiobook", file)
-                    local FileManager = require("apps/filemanager/filemanager")
-                    plugin:_startAlignedPlaybackFromBrowserPath(FileManager.instance or fm, file)
-                end,
-            })
+    fm:addFileDialogButtons("audiobook_open_choice", function(file, is_file)
+        if state.in_zen then return nil end -- already on ZenOS's first page
+        return buildRow(plugin, fm, file, is_file, _)
+    end)
+
+    -- Plugins are created before FileManager:setupLayout, and ZenOS (loaded
+    -- after us) patches FileManager when its own instance is created, so
+    -- look for ZenOS once the library is fully built.
+    UIManager:nextTick(function()
+        if type(FileManager.setupZenContextMenu) ~= "function" then return end
+        pcall(wrapZenChooser, state, fm.file_chooser)
+        if not state.setup_wrapped then
+            state.setup_wrapped = true
+            local orig_setup = FileManager.setupZenContextMenu
+            FileManager.setupZenContextMenu = function(self, ...)
+                local res = orig_setup(self, ...)
+                pcall(wrapZenChooser, state, self.file_chooser)
+                return res
+            end
         end
-        table.insert(row, {
-            text = _("Read aloud (TTS)"),
-            callback = function()
-                closeHoldMenu()
-                logger.info("Audiobook: hold menu -> TTS", file)
-                -- The FileManager instance is torn down when the reader
-                -- opens; the ReaderUI instance picks this up in its init.
-                getmetatable(plugin).__index._pending_tts_start = { path = file }
-                openBook(file)
-            end,
-        })
-        return row
+        logger.info("Audiobook: hold-menu buttons on ZenOS's first page")
     end)
 end
+
 
 --- Called from the ReaderUI instance's init: start TTS when the hold menu
 --- asked for it on this book.

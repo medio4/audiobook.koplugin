@@ -1154,7 +1154,7 @@ function Audiobook:addToMainMenu(menu_items)
                                 callback = function()
                                     self:toggleSetting("open_choice_narrated", false)
                                 end,
-                                help_text = _("Holding a book with a built-in audiobook (its cover or its row in the library) shows Play audiobook and Read aloud (TTS) in its menu. Under ZenOS they are under More, once ZenOS's Plugin actions is on. Off by default."),
+                                help_text = _("Holding a book with a built-in audiobook (its cover or its row in the library) shows Play audiobook and Read aloud (TTS) in its menu. Off by default."),
                             },
                             {
                                 text = _("Text-to-speech button for books without audio"),
