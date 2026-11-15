@@ -1142,6 +1142,31 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("When enabled, the device will suspend after the sleep timer stops playback."),
                     },
                     {
+                        text = _("When a book opens"),
+                        sub_item_table = {
+                            {
+                                text = _("Ask: audiobook or text-to-speech"),
+                                checked_func = function()
+                                    return self:getSetting("open_choice_narrated", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("open_choice_narrated", false)
+                                end,
+                                help_text = _("When you open a book with a built-in audiobook, ask whether to play the audiobook, read it aloud with text-to-speech, or just read. Off by default."),
+                            },
+                            {
+                                text = _("Offer text-to-speech for books without audio"),
+                                checked_func = function()
+                                    return self:getSetting("open_choice_tts_only", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("open_choice_tts_only", false)
+                                end,
+                                help_text = _("When you open a book with no built-in audiobook, ask whether to read it aloud with text-to-speech. Off by default."),
+                            },
+                        },
+                    },
+                    {
                         text_func = function()
                             local off = self:getSetting("smil_sync_offset_ms", 0)
                             return T(_("Overlay sync offset: %1 s"), string.format("%+.1f", off / 1000))
