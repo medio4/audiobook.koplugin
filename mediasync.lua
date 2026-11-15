@@ -800,6 +800,11 @@ end
 --- @param opts table|nil  { prepare_only = true } arms SMIL + bar without audio
 function MediaSync:start(audio_path, timing_data, chapters, cover_path, playlist_files, original_path, start_position, opts)
     opts = opts or {}
+    -- One audio output: playback started anywhere else ends a floating
+    -- (detached) read-along first. Its own track changes pass (same ms).
+    if not opts.prepare_only and self.plugin and self.plugin._endDetachedFor then
+        pcall(self.plugin._endDetachedFor, self.plugin, self)
+    end
     if self.state == self.STATE.PLAYING or self.state == self.STATE.PAUSED then
         -- Soft stop: keep A2DP keepalive + player UI across playlist file changes.
         -- A hard stop was killing track-advance keepalive and hiding the bar,
@@ -994,6 +999,7 @@ end
 -- a headset's play/pause button becomes a no-op.
 function MediaSync:_publishPlayState(playing)
     playing = playing and true or false
+    if self.on_play_state then pcall(self.on_play_state, playing) end
     if self.playback_bar and self.playback_bar.setPlaying then
         pcall(function() self.playback_bar:setPlaying(playing) end)
     end
@@ -1011,8 +1017,29 @@ end
 --- @param keep_chapter_menu boolean|nil
 --- @param opts table|nil  { track_transition = true } spares A2DP keepalive and player UI
 ---                        { drop_chrome = true } hides the bar (document close, TTS takeover)
+--- Book closed with the floating player on: keep the audio, drop
+--- everything that needs the open book (bar, reserved margin, highlights,
+--- page follow). Track changes keep working: they only need the timing.
+function MediaSync:detach()
+    if self.detached then return end
+    self:_cancelSelection()
+    if self.playback_bar then
+        pcall(function() self.playback_bar:hide() end)
+        self.playback_bar = nil
+    end
+    if self.highlight_manager then
+        pcall(function() self.highlight_manager:clearHighlights() end)
+    end
+    self._bar_space_reserved = false
+    self.detached = true
+    logger.warn("MediaSync: detached from the book (floating player), state=", self.state)
+end
+
 function MediaSync:stop(keep_chapter_menu, opts)
     opts = opts or {}
+    -- A detached session ends with a hard stop; the floating player goes
+    -- with it. Cleared at the end so the chrome code below stays guarded.
+    local ending_detached = self.detached and not opts.track_transition
     local track_transition = opts.track_transition and true or false
     local drop_chrome = opts.drop_chrome and true or false
     local was_playing = self.state ~= self.STATE.STOPPED
@@ -1113,6 +1140,10 @@ function MediaSync:stop(keep_chapter_menu, opts)
 
     if was_playing then
         logger.warn("MediaSync: stopped", track_transition and "(track transition)" or "")
+    end
+    if ending_detached then
+        self.detached = nil
+        if self.on_detached_stop then pcall(self.on_detached_stop) end
     end
 end
 
@@ -1325,6 +1356,7 @@ via onDocSettingsLoad (before the first CRE typeset). Off Android a live
 reflow is safe, so the first locked session gets it immediately.
 --]]
 function MediaSync:_reserveMiniBarSpace()
+    if self.detached then return end -- floating player: no book open
     -- Full-screen (non-overlay) player intentionally covers the book.
     if not self.overlay_mode then return end
     if not (self.plugin and self.plugin.ui and self.plugin.ui.rolling) then return end
@@ -1405,6 +1437,7 @@ function MediaSync:_reserveMiniBarSpace()
 end
 
 function MediaSync:_releaseMiniBarSpace()
+    if self.detached then return end -- floating player: no book open
     -- Locked inset stays for TTS and Storyteller; the plugin owns the
     -- restore decision (see Audiobook:_releaseAudiobookChromeMargins).
     if self.plugin and self.plugin._releaseAudiobookChromeMargins then
@@ -2232,6 +2265,13 @@ function MediaSync:_updateHighlightAtTime(pos)
     local sentence = self.timing_data[sent_idx]
     if not sentence then return end
 
+    -- Floating player (book closed): only track the narrated line, so line
+    -- skip counts from the right place; nothing to highlight or turn.
+    if self.detached then
+        self._current_sentence_idx = sent_idx
+        return
+    end
+
     -- Update sentence highlight if changed
     if sent_idx ~= self._current_sentence_idx then
         self._current_sentence_idx = sent_idx
@@ -2959,6 +2999,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function MediaSync:showPlaybackBar()
+    if self.detached then return end -- floating player: no book open
     if self.playback_bar and self.playback_bar:isVisible() then
         -- Track transitions soft-stop and reuse the same player UI — refresh
         -- the chapter label so we don't keep the first playlist entry forever.
@@ -3177,6 +3218,7 @@ function MediaSync:showPlaybackBar()
 end
 
 function MediaSync:navigateToSentenceEntry(entry)
+    if self.detached then return false end -- floating player: no book open
     -- Jump to a specific SMIL timing entry by fragment id (preferred for
     -- "Play aligned from here", where looking up by start_time can hit the
     -- wrong sentence when several share similar clip times).
@@ -3254,6 +3296,7 @@ function MediaSync:navigateToSentenceAtTime(seconds)
 end
 
 function MediaSync:refocusToCurrentSentence()
+    if self.detached then return end -- floating player: no book open
     logger.warn("MediaSync: refocusToCurrentSentence called")
     if not self.overlay_mode then
         logger.warn("MediaSync: refocus aborted, not overlay_mode")

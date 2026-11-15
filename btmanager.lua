@@ -604,6 +604,17 @@ function BTManager:_showFirmwareError()
     })
 end
 
+--- Switch Wi-Fi back off if powerOn switched it on only for the MTK chip.
+function BTManager:_restoreWifiOff()
+    if not self._restore_wifi_off then return end
+    self._restore_wifi_off = nil
+    local ok_nm, NetworkMgr = pcall(require, "ui/network/manager")
+    if ok_nm and NetworkMgr and NetworkMgr.turnOffWifi then
+        logger.warn("BTManager: turning Wi-Fi back off")
+        pcall(NetworkMgr.turnOffWifi, NetworkMgr)
+    end
+end
+
 --- Power on the Bluetooth adapter.
 -- For BlueZ devices, starts the bluetoothd daemon and resets the HCI
 -- adapter first (required on Kobo Libra 2 and similar).
@@ -667,6 +678,31 @@ function BTManager:powerOn()
         -- works, the bt_fw_fatures file is not needed (a Clara BW never
         -- has one and powers up fine), so only fall back to the file check
         -- when the service refuses.
+        --
+        -- Wi-Fi and Bluetooth share one MTK combo chip, which only comes up
+        -- through the Wi-Fi driver: KOReader's Kobo plugin switches Wi-Fi on
+        -- before Bluetooth ("ensure WiFi is enabled before Bluetooth
+        -- connection", its #35) and back off once Bluetooth runs. Do the
+        -- same, so Wi-Fi is on for seconds only (battery).
+        local NetworkMgr
+        local ok_nm, nm = pcall(require, "ui/network/manager")
+        if ok_nm then NetworkMgr = nm end
+        local wifi_was_on = true
+        if NetworkMgr and NetworkMgr.isWifiOn then
+            local ok_w, on = pcall(NetworkMgr.isWifiOn, NetworkMgr)
+            wifi_was_on = not ok_w or on and true or false
+        end
+        if not wifi_was_on and NetworkMgr.restoreWifiAsync then
+            logger.warn("BTManager: Wi-Fi is off; turning it on briefly for the MTK chip")
+            pcall(NetworkMgr.restoreWifiAsync, NetworkMgr)
+            for _ = 1, 24 do    -- up to 6 s for the driver to load
+                local ok_w, on = pcall(NetworkMgr.isWifiOn, NetworkMgr)
+                if ok_w and on then break end
+                os.execute("sleep 0.25")
+            end
+            -- Turned back off once Powered has been set (below).
+            self._restore_wifi_off = true
+        end
         local out, on_ok = dbus(dbus_cmd("/", "com.kobo.bluetooth.BluedroidManager1.On", 15000))
         if on_ok then
             logger.warn("BTManager: MTK BluedroidManager1.On ok")
@@ -676,6 +712,7 @@ function BTManager:powerOn()
             local fw_found = self:_checkMtkFirmware()
             if not fw_found then
                 logger.err("BTManager: MTK firmware file not found — need to boot into Nickel first")
+                self:_restoreWifiOff()
                 self:_showFirmwareError()
                 return false
             end
@@ -856,6 +893,10 @@ function BTManager:powerOn()
     local _, ok = set_property(ADAPTER_PATH, ADAPTER_IFACE, "Powered", "variant:boolean:true")
     -- Give the stack a moment to initialize
     if ok then os.execute("sleep 2") end
+
+    -- MTK: Wi-Fi was only switched on to bring the chip up; switch it off
+    -- again now that Bluetooth runs (Bluetooth stays on).
+    self:_restoreWifiOff()
 
     -- Start BlueALSA proactively on BlueZ so the ALSA PCM is ready
     -- before any audio playback begins.  Previously BlueALSA was only
