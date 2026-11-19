@@ -2011,10 +2011,20 @@ function Audiobook:_entryOnCurrentPage(parser, timing_data)
     local cur_page = doc:getPageFromXPointer(cur_xp)
     if not cur_page then return nil end
     local frag_tag = "DocFragment[" .. frag_idx .. "]"
+    -- crengine namespaces ids of merged content documents as
+    -- "_doc_fragment_<n-1>_ <id>"; try that first, then the raw id.
+    local ns = string.format("#_doc_fragment_%d_ ", frag_idx - 1)
+    local function resolve(id)
+        local ok, xp = pcall(doc.getNormalizedXPointer, doc, ns .. id)
+        if ok and xp and xp ~= false then return xp end
+        ok, xp = pcall(doc.getNormalizedXPointer, doc, "#" .. id)
+        if ok and xp and xp ~= false then return xp end
+        return nil
+    end
     local function page_of(e)
-        local ok, xp = pcall(doc.getNormalizedXPointer, doc, "#" .. e.fragment_id)
+        local xp = resolve(e.fragment_id)
         -- Ids can repeat across chapters: only trust a hit in this document.
-        if not ok or not xp or xp == false or not xp:find(frag_tag, 1, true) then
+        if not xp or not xp:find(frag_tag, 1, true) then
             return nil
         end
         local ok2, pg = pcall(doc.getPageFromXPointer, doc, xp)
