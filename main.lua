@@ -1005,6 +1005,17 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("When enabled (default), the book view auto-turns to keep the current narration sentence on screen while you stay with the read-aloud. Manually turning a page never seeks or restarts audio: highlighting pauses and a “Return to read-aloud” cue appears until you jump back or the narration catches up."),
                     },
                     {
+                        text = _("Page turn skips the audiobook ahead"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("page_turn_skips_audio", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("page_turn_skips_audio", false)
+                        end,
+                        help_text = _("For books with a built-in audiobook: while it plays, turning to a later page than the one being read moves the audio to the first line of the new page. Turning back still only browses (the audio keeps its place and the “Return to read-aloud” cue appears). Off by default."),
+                    },
+                    {
                         text = _("Keep the audiobook bar"),
                         enabled_func = function() return (self.ui and self.ui.document) or false end,
                         checked_func = function()
@@ -4483,6 +4494,88 @@ function Audiobook:_hideReturnToReadAloudButton()
     end
 end
 
+--- Setting "Page turn skips the audiobook ahead": the reader turned to a
+--- page after the one being narrated, so move the audio to the first line
+--- of that page. Within the playing audio part this is a line selection
+--- (shown at once, seeked after a short pause, so quick turns coalesce); a
+--- page in a later part restarts there once turning has settled.
+-- @treturn bool true when the audio is being moved
+function Audiobook:_skipAudioToTurnedPage()
+    local ms = self.media_sync
+    if not (ms and ms.overlay_mode and ms.timing_data and ms.media_engine
+            and ms.state == ms.STATE.PLAYING) then
+        return false
+    end
+    local doc = self.ui and self.ui.document
+    local ok_p, page = pcall(function() return doc:getCurrentPage() end)
+    page = ok_p and tonumber(page) or nil
+    if not page then return false end
+    local cur = ms:_skipBase()
+    local cur_page = ms:_entryPage(cur)
+    -- Forward turns only; a page we cannot place is left alone.
+    if not cur_page or page <= cur_page then return false end
+
+    -- First line of this part starting on the new page. Pages rise with
+    -- the line index, so binary search; fall back to a bounded scan if a
+    -- line cannot be placed.
+    local n = #ms.timing_data
+    local lo, hi, found = cur + 1, n, nil
+    local placed = true
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        local p = ms:_entryPage(mid)
+        if not p then placed = false break end
+        if p >= page then found, hi = mid, mid - 1 else lo = mid + 1 end
+    end
+    if not placed then
+        found = nil
+        for i = cur + 1, math.min(n, cur + 400) do
+            local p = ms:_entryPage(i)
+            if p and p >= page then found = i break end
+        end
+    end
+    if found then
+        if (ms:_entryPage(found) or page) > page then
+            -- Nothing starts on this page: the line running onto it.
+            found = found - 1
+            if found <= cur then return false end -- that line is playing now
+        end
+        if self._page_skip_timer then
+            UIManager:unschedule(self._page_skip_timer)
+            self._page_skip_timer = nil
+        end
+        logger.warn("Audiobook: page turn to", page, "skips audio: line", cur, "->", found)
+        return ms:_selectLine(found)
+    end
+
+    -- Past the end of this audio part: find the line in the whole book and
+    -- restart there, after the reader stops turning.
+    local entry = self:_entryOnCurrentPage(self._smil_parser, self._smil_timing_data)
+    if not (entry and entry.audio_path)
+            or entry.audio_path == ms.media_engine.current_path then
+        return false
+    end
+    ms:_cancelSelection()
+    if self._page_skip_timer then UIManager:unschedule(self._page_skip_timer) end
+    local doc_path = self:_openDocPath()
+    self._page_skip_timer = function()
+        self._page_skip_timer = nil
+        if self:_openDocPath() ~= doc_path or not self.media_sync
+                or self.media_sync.state ~= self.media_sync.STATE.PLAYING then
+            return
+        end
+        -- The reader may have turned again: use the page on screen now.
+        local e = self:_entryOnCurrentPage(self._smil_parser, self._smil_timing_data)
+        if e and e.audio_path then
+            logger.warn("Audiobook: page turn skips audio to another part:",
+                e.audio_path:match("([^/]+)$"), "t=", e.start_time)
+            self:_startSmilPlayback(doc_path, e, false)
+        end
+    end
+    UIManager:scheduleIn(1.0, self._page_skip_timer)
+    return true
+end
+
 function Audiobook:_handlePageTurnFollow()
     if not self._init_ok then return end
     if not self.media_sync then return end
@@ -4497,6 +4590,18 @@ function Audiobook:_handlePageTurnFollow()
     if (self._media_sync_page_follow_count or 0) > 0 then return end
     -- Re-entry / rapid-repeat guard.
     if self._in_handle_page_turn_follow then return end
+    -- Setting: a forward turn moves the audio to the new page. Checked before
+    -- the rapid-repeat guard so quick turns land on the last page reached.
+    if self:getSetting("page_turn_skips_audio", false) then
+        local ok_s, skipped = pcall(self._skipAudioToTurnedPage, self)
+        if not ok_s then
+            logger.warn("Audiobook: page-turn skip failed:", skipped)
+        elseif skipped then
+            self._readaloud_browsing_away = false
+            self:_hideReturnToReadAloudButton()
+            return
+        end
+    end
     if Time then
         local now = Time.now()
         if self._page_turn_follow_deadline and now < self._page_turn_follow_deadline then
