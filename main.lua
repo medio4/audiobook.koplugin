@@ -2076,42 +2076,24 @@ function Audiobook:_loadOverlayInBackground(doc_path, parser, opts, resume)
     end
     self:_cancelOverlayLoad("another load started")
 
-    local ms = self.media_sync
     job = {
         doc_path = doc_path,
         prepare_only = opts.prepare_only and true or false,
         resume = resume,
         start_xp = self:_readerXPointer(),
-        shown_bar = not (ms.playback_bar and ms.playback_bar:isVisible()),
     }
-    local function setText(text)
-        local bar = self.media_sync and self.media_sync.playback_bar
-        if bar and bar.setLoadingText then pcall(bar.setLoadingText, bar, text) end
-    end
-    local function dropBar()
-        setText(nil)
-        if job.shown_bar and self.media_sync
-                and not self.media_sync:_shouldKeepOverlayBar() then
-            pcall(function() self.media_sync:stop() end)
-        end
-    end
-
-    pcall(function()
-        ms.overlay_mode = true
-        ms:showPlaybackBar()
-    end)
-    setText(_("Loading audiobook…"))
+    self:_barLoadingBegin()
 
     job.loader = OverlayLoader.start(parser, doc_path, plugin_dir,
         function(cur, total)
             if self._overlay_job ~= job then return end
-            setText(T(_("Loading audiobook %1 / %2"), cur, total))
+            self:_barLoadingText(T(_("Loading audiobook %1 / %2"), cur, total))
         end,
         function(ok, err)
             if self._overlay_job ~= job then return end
             self._overlay_job = nil
             if self:_openDocPath() ~= doc_path then
-                setText(nil)
+                self:_barLoadingEnd(false)
                 return
             end
             if not ok then
@@ -2122,7 +2104,7 @@ function Audiobook:_loadOverlayInBackground(doc_path, parser, opts, resume)
                     ok = false, stage = "loadFromEpub", error = why,
                     book = doc_path:match("([^/]+)$"),
                 })
-                dropBar()
+                self:_barLoadingEnd(true)
                 UIManager:show(InfoMessage:new{
                     text = _("This book has no built-in audiobook."),
                     timeout = 4,
@@ -2134,19 +2116,25 @@ function Audiobook:_loadOverlayInBackground(doc_path, parser, opts, resume)
                 -- of forking the same parse again.
                 self._overlay_bg_no_cache = doc_path
             end
-            setText(nil)
+            self:_barLoadingText(_("Starting…"))
             local moved = job.start_xp ~= self:_readerXPointer()
             logger.warn("Audiobook: background load done; moved=", moved,
                 "prepare_only=", job.prepare_only)
-            local ok_r, r_err = pcall(job.resume, moved, job.prepare_only)
-            if not ok_r then
-                logger.warn("Audiobook: start after background load failed:", r_err)
-                dropBar()
-            end
+            -- Let "Starting…" paint before the (blocking) audio start.
+            UIManager:scheduleIn(0.05, function()
+                if self:_openDocPath() ~= doc_path then
+                    self:_barLoadingEnd(false)
+                    return
+                end
+                local ok_r, r_err = pcall(job.resume, moved, job.prepare_only)
+                if not ok_r then
+                    logger.warn("Audiobook: start after background load failed:", r_err)
+                    self:_barLoadingEnd(true)
+                end
+            end)
         end)
     if not job.loader then
-        dropBar()
-        return false
+        return false -- the caller loads in-process; its wrapper clears the bar
     end
     self._overlay_job = job
     return true
@@ -2159,13 +2147,86 @@ function Audiobook:_cancelOverlayLoad(reason)
     self._overlay_job = nil
     if job.loader then pcall(job.loader.cancel, job.loader) end
     logger.warn("Audiobook: background overlay load cancelled:", reason or "")
+    self:_barLoadingEnd(false)
+end
+
+-- ── "Loading audiobook…" in the bar for every start ─────────────────
+
+--- Show the bar (if it is not up yet) with a loading line instead of the clock.
+function Audiobook:_barLoadingBegin(text)
+    local ms = self.media_sync
+    if not ms then return end
+    if not self._bar_loading then
+        self._bar_loading = {
+            shown_bar = not (ms.playback_bar and ms.playback_bar:isVisible()),
+        }
+        pcall(function()
+            ms.overlay_mode = true
+            ms:showPlaybackBar()
+        end)
+    end
+    self:_barLoadingText(text or _("Loading audiobook…"))
+end
+
+function Audiobook:_barLoadingText(text)
     local bar = self.media_sync and self.media_sync.playback_bar
-    if bar and bar.setLoadingText then pcall(bar.setLoadingText, bar, nil) end
+    if bar and bar.setLoadingText then pcall(bar.setLoadingText, bar, text) end
+end
+
+--- Clear the loading line. failed = nothing started: take down a bar that
+--- was only put up for the load (a pinned bar stays).
+function Audiobook:_barLoadingEnd(failed)
+    local st = self._bar_loading
+    self._bar_loading = nil
+    self:_barLoadingText(nil)
+    local ms = self.media_sync
+    if failed and st and st.shown_bar and ms and not ms:_shouldKeepOverlayBar()
+            and ms.state == ms.STATE.STOPPED then
+        pcall(function() ms:stop() end)
+    end
+end
+
+--- Put "Loading audiobook…" in the bar, let it paint, then start. The
+--- start itself (reading the stored parse, audio engine, Bluetooth) still
+--- runs on the UI loop, but the reader sees at once that it is coming.
+function Audiobook:_withBarLoading(doc_path, opts, run)
+    if opts._bar_loading or not self.media_sync or self:_openDocPath() ~= doc_path then
+        local ok, err = pcall(run)
+        if not ok then logger.warn("Audiobook: start failed:", err) end
+        local job = self._overlay_job
+        if not (job and job.doc_path == doc_path) then
+            self:_barLoadingEnd(self._smil_doc_path ~= doc_path)
+        end
+        return
+    end
+    self:_barLoadingBegin()
+    UIManager:scheduleIn(0.05, function()
+        if self:_openDocPath() ~= doc_path then
+            self:_barLoadingEnd(true)
+            return
+        end
+        opts._bar_loading = true
+        self:_withBarLoading(doc_path, opts, run)
+    end)
 end
 
 --- @param opts table|nil  { prepare_only = true } arms the overlay (bar, SMIL,
 --- saved position) without starting audio; Play continues from the mark.
 function Audiobook:_startSmilPlayback(doc_path, start_entry, allow_resume, opts)
+    opts = opts or {}
+    self:_withBarLoading(doc_path, opts, function()
+        self:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, opts)
+    end)
+end
+
+function Audiobook:_startSmilPlaybackFromSelection(doc_path, selected_text, allow_resume, bar_ready)
+    self:_withBarLoading(doc_path, { _bar_loading = bar_ready }, function()
+        self:_startSmilPlaybackFromSelectionNow(doc_path, selected_text, allow_resume)
+    end)
+end
+
+--- Body of _startSmilPlayback, run once "Loading audiobook…" is in the bar.
+function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, opts)
     opts = opts or {}
     allow_resume = (allow_resume == true)
 
@@ -2221,7 +2282,7 @@ function Audiobook:_startSmilPlayback(doc_path, start_entry, allow_resume, opts)
         -- in the bar, and come back here when it is done.
         if self:_loadOverlayInBackground(doc_path, parser, opts,
                 function(moved, prepare_only)
-                    local again = { prepare_only = prepare_only }
+                    local again = { prepare_only = prepare_only, _bar_loading = true }
                     if moved then
                         -- The reader turned pages while it loaded: start
                         -- (or arm) at the page they are on now, no prompt,
@@ -2246,8 +2307,15 @@ function Audiobook:_startSmilPlayback(doc_path, start_entry, allow_resume, opts)
         end
 
         local err
+        local t0 = Time and Time.now()
         timing_data, err = parser:loadFromEpub(doc_path, plugin_dir,
             loading_msg and self:_smilProgressUi(loading_msg) or nil)
+        if t0 then
+            pcall(function()
+                logger.warn("Audiobook: overlay load took",
+                    Time.to_ms(Time.since(t0)), "ms")
+            end)
+        end
 
         if loading_msg then
             UIManager:close(loading_msg)
@@ -2537,7 +2605,10 @@ function Audiobook:_startSmilPlayback(doc_path, start_entry, allow_resume, opts)
     -- When invoked from the main menu, offer to resume from the last saved position.
     if allow_resume then
         self:_promptResumeAlignedPlayback(doc_path, timing_data, start_entry, function(chosen_entry)
-            do_start(chosen_entry)
+            -- Answered later: show "Loading audiobook…" again for the start.
+            self:_withBarLoading(doc_path, {}, function()
+                do_start(chosen_entry)
+            end)
         end)
     else
         do_start(start_entry)
@@ -3562,7 +3633,7 @@ function Audiobook:startAlignedAudioFromSelection(selected_text)
     self:_startSmilPlaybackFromSelection(doc_path, selected_text, false)
 end
 
-function Audiobook:_startSmilPlaybackFromSelection(doc_path, selected_text, allow_resume)
+function Audiobook:_startSmilPlaybackFromSelectionNow(doc_path, selected_text, allow_resume)
     allow_resume = (allow_resume ~= false)
     -- A new play-from-here ends any manual browsing-away state, or the
     -- highlight stays frozen for the whole new session.
@@ -3616,9 +3687,9 @@ function Audiobook:_startSmilPlaybackFromSelection(doc_path, selected_text, allo
                     if moved then
                         -- Pages turned while it loaded: the page now on
                         -- screen wins over the selection made before.
-                        self:_startSmilPlayback(doc_path, nil, false)
+                        self:_startSmilPlayback(doc_path, nil, false, { _bar_loading = true })
                     else
-                        self:_startSmilPlaybackFromSelection(doc_path, selected_text, allow_resume)
+                        self:_startSmilPlaybackFromSelection(doc_path, selected_text, allow_resume, true)
                     end
                 end) then
             return
@@ -3683,7 +3754,7 @@ function Audiobook:_startSmilPlaybackFromSelection(doc_path, selected_text, allo
             self:_startSmilPlayback(doc_path, chosen_entry)
         end)
     else
-        self:_startSmilPlayback(doc_path, start_entry)
+        self:_startSmilPlayback(doc_path, start_entry, nil, { _bar_loading = true })
     end
 end
 
