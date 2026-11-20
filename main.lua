@@ -636,6 +636,17 @@ function Audiobook:showSyncControl()
     end)
 end
 
+--- Tap to sync: tap the word being heard, the offset is set from it.
+-- on_done(new_ms) runs once it is set (for a control that shows the value).
+function Audiobook:startTapToSync(on_done)
+    local ok, TapSync = pcall(dofile, PLUGIN_PATH .. "tapsync.lua")
+    if not ok then
+        logger.warn("Audiobook: tapsync failed to load:", TapSync)
+        return
+    end
+    TapSync.start(self, on_done)
+end
+
 function Audiobook:onAudiobookShowPlayer()
     local bar = self.media_sync and self.media_sync.playback_bar
     if bar and bar.openFull then pcall(bar.openFull, bar) end
@@ -936,6 +947,17 @@ function Audiobook:addToMainMenu(menu_items)
                             self:showSyncControl()
                         end,
                         help_text = _("Moves the read-along highlight later or earlier than the narration, for this book. Opens a control with the current shift in words and on a scale, earlier/later buttons, and Tap to sync: tap the word you hear and the shift is worked out for you. The full-screen player's sync label opens the same control."),
+                    },
+                    {
+                        text = _("Tap to sync"),
+                        enabled_func = function()
+                            local ms = self.media_sync
+                            return (ms and ms.timing_data and ms.state ~= ms.STATE.STOPPED) and true or false
+                        end,
+                        callback = function()
+                            self:startTapToSync()
+                        end,
+                        help_text = _("While the audiobook plays, tap the word you hear. The highlight timing is set from that tap, for the offset above."),
                     },
                 },
             },
