@@ -1201,7 +1201,10 @@ function HighlightManager:highlightWord(word, parsed_data)
     self.is_highlighting = true
     if not word or not word.text then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
-    if self.plugin and self.plugin.getSetting
+    -- Shown when the setting is on, or for a few seconds after a sync change
+    -- (force_words_until, set by syncui) so the change can be checked.
+    local forced = self.force_words_until and os.time() <= self.force_words_until
+    if not forced and self.plugin and self.plugin.getSetting
             and self.plugin:getSetting("highlight_words", false) ~= true then
         return
     end

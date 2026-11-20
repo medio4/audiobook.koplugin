@@ -1789,7 +1789,7 @@ function MediaSync:_commitSelection()
     -- previous one for the length of the offset.
     local off = 0
     if self.plugin and self.plugin.getSetting then
-        off = (self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
+        off = (self.plugin.getSyncOffsetMs and self.plugin:getSyncOffsetMs() or self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
     end
     local t = entry.start_time + off
     if entry.end_time and entry.end_time > entry.start_time and t >= entry.end_time then
@@ -2257,7 +2257,7 @@ function MediaSync:_startSyncLoop(gen)
         local lat = (self.media_engine and self.media_engine.position_latency_s) or 0
         local off = 0
         if self.plugin and self.plugin.getSetting then
-            off = (self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
+            off = (self.plugin.getSyncOffsetMs and self.plugin:getSyncOffsetMs() or self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
         end
         -- While line skip is selecting, the highlight shows the selection;
         -- the audio keeps playing until the selection is committed.
@@ -2445,12 +2445,21 @@ function MediaSync:_updateHighlightAtTime(pos)
         self:_ensureSentenceHighlighted(sentence, sent_idx)
     end
 
-    -- Find current word within sentence (if word-level timing available)
-    if sentence.words and #sentence.words > 0 then
-        local word_idx = self:_findWordAtTime(sentence.words, pos)
+    -- Find current word within sentence (if word-level timing available).
+    -- Right after a sync change, read-alongs without word timing get an
+    -- estimate (each word's share of the line by characters) so the spoken
+    -- word lights up for a few seconds.
+    local words = sentence.words
+    local hm_forced = self.highlight_manager and self.highlight_manager.force_words_until
+        and os.time() <= self.highlight_manager.force_words_until
+    if not (words and #words > 0) and hm_forced then
+        words = self:_estimatedWords(sentence)
+    end
+    if words and #words > 0 then
+        local word_idx = self:_findWordAtTime(words, pos)
         if word_idx and word_idx ~= self._current_word_idx then
             self._current_word_idx = word_idx
-            local word = sentence.words[word_idx]
+            local word = words[word_idx]
             if self.highlight_manager and word then
                 pcall(function()
                     self.highlight_manager:highlightWord(word, {sentences = {sentence}})
@@ -2846,6 +2855,26 @@ function MediaSync:_findSentenceAtTime(pos)
     return nil
 end
 
+--- Estimated word timings for a line without them: each word gets the
+--- share of the line's time that its characters have. Cached on the entry.
+function MediaSync:_estimatedWords(sentence)
+    if sentence._est_words then return sentence._est_words end
+    local text = sentence.text or ""
+    local t0, t1 = sentence.start_time, sentence.end_time
+    if text == "" or not (t0 and t1) or t1 <= t0 then return nil end
+    local n = #text
+    local words = {}
+    for s, w, e in text:gmatch("()(%S+)()") do
+        table.insert(words, {
+            text = w,
+            start_time = t0 + (t1 - t0) * ((s - 1) / n),
+            end_time = t0 + (t1 - t0) * ((e - 1) / n),
+        })
+    end
+    sentence._est_words = words
+    return words
+end
+
 function MediaSync:_findWordAtTime(words, pos)
     for i, word in ipairs(words) do
         if pos >= word.start_time and pos < word.end_time then
@@ -3119,13 +3148,16 @@ function MediaSync:showPlaybackBar()
             and self.plugin:getSetting("player_line_view", false) or nil,
         on_sync_nudge = self.overlay_mode and function(delta_ms)
             local p = self.plugin
-            if not (p and p.getSetting) then return nil end
+            if not p then return nil end
+            -- Per book, with the after-change feedback (syncui).
+            if p.nudgeSyncOffset then return p:nudgeSyncOffset(delta_ms) end
+            if not p.getSetting then return nil end
             local v = (p:getSetting("smil_sync_offset_ms", 0) or 0) + delta_ms
-            -- No flush: writing the whole reader settings file on every tap
-            -- froze the UI for seconds on e-ink devices.
             p:setSetting("smil_sync_offset_ms", v, true)
             return v
         end or nil,
+        on_sync_control = self.overlay_mode and self.plugin and self.plugin.showSyncControl
+            and function() pcall(self.plugin.showSyncControl, self.plugin) end or nil,
         show_shuffle = self.playlist_files and #self.playlist_files > 0,
         shuffle_active = self.is_shuffled,
         show_loop = self.playlist_files and #self.playlist_files > 0,
