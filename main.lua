@@ -571,6 +571,15 @@ function Audiobook:onDispatcherRegisterActions()
     })
 end
 
+--- KOReader's status bar was shown or hidden: the bar follows it (above it
+--- when shown, at the bottom when hidden).
+function Audiobook:onReaderFooterVisibilityChange()
+    UIManager:nextTick(function()
+        local bar = self.media_sync and self.media_sync.playback_bar
+        if bar and bar.onFooterChanged then pcall(bar.onFooterChanged, bar) end
+    end)
+end
+
 function Audiobook:onAudiobookShowPlayer()
     local bar = self.media_sync and self.media_sync.playback_bar
     if bar and bar.openFull then pcall(bar.openFull, bar) end

@@ -1050,7 +1050,11 @@ end
 
 --- The bar's own slot: the book's margins leave room for it here.
 function AudiobookPlayer:_dockedBarY()
-    return self.height - self._mini_height - self:_statusBarInset()
+    -- Above the status bar when it shows; at the very bottom, with a small
+    -- margin, when it does not.
+    local inset = self:_statusBarInset()
+    local gap = inset > 0 and 0 or Screen:scaleBySize(4)
+    return self.height - self._mini_height - inset - gap
 end
 
 --- Where the bar sits.  On the book page always in its slot (the text is
@@ -1083,6 +1087,14 @@ function AudiobookPlayer:_menuOver()
 end
 
 --- Follow a menu opening or closing: move dimen and repaint both places.
+--- The reader's status bar was shown or hidden: sit above it, or drop to
+--- the bottom.
+function AudiobookPlayer:onFooterChanged()
+    if not self._minimized then return end
+    self.covers_footer = not self:_shouldSitAboveFooter()
+    self:_syncPosition()
+end
+
 function AudiobookPlayer:_syncPosition()
     if not (self.visible and self._minimized) then return end
     local y = self:_miniBarY()
