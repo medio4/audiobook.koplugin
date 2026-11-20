@@ -3227,6 +3227,12 @@ function MediaSync:showPlaybackBar()
                 self.plugin:_cancelSleepTimer()
             end
         end,
+        -- Play while off the narrated page: choices (play and go back /
+        -- go back / play from this page) instead of acting at once.
+        on_return_choice = self.overlay_mode and self.plugin
+            and self.plugin._showReturnChoices and function()
+            pcall(self.plugin._showReturnChoices, self.plugin)
+        end or nil,
         on_refocus = self.overlay_mode and function()
             if self.plugin then
                 self.plugin._readaloud_browsing_away = false

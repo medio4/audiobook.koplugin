@@ -4669,6 +4669,8 @@ function Audiobook:_pauseOnBackTurn()
     self._readaloud_browsing_away = true
     ms:pause()
     pcall(function() ms:clearSentenceHighlight() end)
+    -- Off the narrated page now: the bar's Play opens into its choices.
+    self:_showReturnToReadAloudButton()
     self._play_from_page = true
     logger.warn("Audiobook: turned back to page", page, "from", cur_page, "; paused")
     local bar = ms.playback_bar
@@ -4678,18 +4680,66 @@ function Audiobook:_pauseOnBackTurn()
     return true
 end
 
+--- Play tapped on the bar while the page on screen is not the narrated one
+--- (browsing away): the Play button opens into choices instead of acting
+--- at once. Paused: play and go back to the read-along line / go back
+--- without playing / (page turns setting on) play from this page.
+--- Playing: go back to the playing line / pause.
+function Audiobook:_showReturnChoices()
+    local ms = self.media_sync
+    if not ms then return end
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dlg
+    local function go_back()
+        self._play_from_page = nil
+        self._readaloud_browsing_away = false
+        self:_hideReturnToReadAloudButton()
+        pcall(function() ms:refocusToCurrentSentence() end)
+    end
+    local function act(fn)
+        return function()
+            UIManager:close(dlg)
+            local ok, err = pcall(fn)
+            if not ok then logger.warn("Audiobook: return choice failed:", err) end
+        end
+    end
+    local rows
+    if ms.state == ms.STATE.PLAYING then
+        rows = {
+            {{ text = _("Go back to the playing line"), callback = act(go_back) }},
+            {{ text = _("Pause"), callback = act(function() ms:pause() end) }},
+        }
+    else
+        rows = {
+            {{ text = _("Play, and go back to the read-along line"), callback = act(function()
+                self._play_from_page = nil
+                self:_resumeFromPage("mark")
+            end) }},
+            {{ text = _("Go back to the read-along line, don't play"), callback = act(go_back) }},
+        }
+        if self:getSetting("page_turn_skips_audio", false) then
+            table.insert(rows, 2, {{ text = _("Play from this page"), callback = act(function()
+                self:_resumeFromPage("page")
+            end) }})
+        end
+    end
+    dlg = ButtonDialog:new{ buttons = rows }
+    UIManager:show(dlg)
+end
+
 --- Play after a back-turn pause: start from the first line of the page on
 --- screen instead of the pause mark. Called from MediaSync:resume.
 -- @treturn bool true when it took over the resume
-function Audiobook:_resumeFromPage()
-    if not self._play_from_page then return false end
+function Audiobook:_resumeFromPage(mode)
+    if not (self._play_from_page or mode) then return false end
     self._play_from_page = nil
     local ms = self.media_sync
     if not (ms and ms.timing_data and ms.state == ms.STATE.PAUSED) then return false end
 
     -- Setting: start from this page, or where playback left off. Asked
-    -- the first time, then remembered (changeable in the menu).
-    local choice = self:getSetting("back_turn_play_from", nil)
+    -- the first time, then remembered (changeable in the menu). `mode`
+    -- (from the Play button's choices) overrides it.
+    local choice = mode or self:getSetting("back_turn_play_from", nil)
     if choice ~= "page" and choice ~= "mark" then
         local ButtonDialog = require("ui/widget/buttondialog")
         local dlg

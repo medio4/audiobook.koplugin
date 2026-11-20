@@ -1045,6 +1045,12 @@ end
 
 -- Callback handlers
 function AudiobookPlayer:onPlayPause()
+    -- Off the narrated page: Play opens into "play and go back" / "go back"
+    -- choices (see Audiobook:_showReturnChoices).
+    if self._return_hint_active and self.on_return_choice then
+        self.on_return_choice()
+        return
+    end
     if self.on_play_pause then self.on_play_pause() end
 end
 
@@ -2210,7 +2216,8 @@ function AudiobookPlayer:_updateMiniWidgets()
     -- "Return to read-aloud" cue (tapping the bar centers on the sentence).
     local track
     if self._return_hint_active then
-        track = _("Return to read-aloud")
+        track = self.on_return_choice and _("Off the read-along page: tap ▶")
+            or _("Return to read-aloud")
     else
         track = self.chapter_title
         if not track or track == "" then
@@ -2592,8 +2599,10 @@ function AudiobookPlayer:handleEvent(event)
                     end
                     -- While browsing away from the narration page, a tap on
                     -- the unused mini-bar area means "return to read-aloud"
-                    -- (same as ○), not "expand full player".
-                    if self._return_hint_active and self.on_refocus then
+                    -- (same as ○), not "expand full player". With the Play
+                    -- button choices wired, Play is the way back instead.
+                    if self._return_hint_active and self.on_refocus
+                            and not self.on_return_choice then
                         logger.warn("ABP: return-hint bar tap -> refocus")
                         self:onRefocus()
                         return true
