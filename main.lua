@@ -35,7 +35,7 @@ local BtUI, BtMediaControl, BugReport, BenchmarkRunner, MenuBuilder, Utils, Upda
 local SessionRecorder
 -- Seconds to start before a line when playing from it (headphones miss the
 -- first moment of a new stream).
-local LINE_START_LEAD_S = 0.3
+local LINE_START_LEAD_S = 0.6
 local PLUGIN_PATH
 
 -- Floating player (setting floating_player): a read-along that keeps
