@@ -42,7 +42,10 @@ local logger = require("logger")
 local _ = require("audiobook_gettext")
 local T = require("ffi/util").template
 
-local AudiobookPlayer = InputContainer:extend{
+local FocusManager = require("ui/widget/focusmanager")
+-- FocusManager (an InputContainer) gives the full-screen player key and
+-- D-pad navigation; the minimized bar passes keys through (handleEvent).
+local AudiobookPlayer = FocusManager:extend{
     plugin = nil,
     is_playing = true,
     progress = 0,
@@ -729,6 +732,43 @@ function AudiobookPlayer:setupUI()
     self.dimen.x = 0
     self.dimen.y = 0
 
+    -- Key / D-pad navigation of the full-screen player (FocusManager):
+    -- rows as they appear on screen; arrows move, Press presses.
+    local function row(...)
+        local r = {}
+        for i = 1, select("#", ...) do
+            local w = select(i, ...)
+            if w then table.insert(r, w) end
+        end
+        return r
+    end
+    local nav = {}
+    local function add_row(r) if #r > 0 then table.insert(nav, r) end end
+    add_row(row(self.chapter_list_button, self.sleep_timer_button, self.locate_button,
+        self.show_shuffle and self.shuffle_button or false,
+        self.show_loop and self.loop_button or false,
+        self.speed_button, self.tts_mode and self.settings_button or false,
+        self.minimize_button, self.close_button))
+    add_row(row(self.skip_back_button, self.line_back_button or false, self.play_pause_button,
+        self.line_forward_button or false, self.skip_forward_button))
+    add_row(row(self.prev_chapter_button, self.vol_minus_button, self.vol_plus_button,
+        self.next_chapter_button))
+    add_row(row(self.sync_minus_button or false, self.sync_plus_button or false))
+    self.layout = nav
+    self._play_row = 2
+    -- Start on Play.
+    self.selected = { x = 1, y = 1 }
+    if nav[2] then
+        for i, w in ipairs(nav[2]) do
+            if w == self.play_pause_button then self.selected = { x = i, y = 2 } end
+        end
+    end
+    -- Back minimizes (the ✕ button stops playback; a key should not).
+    if Device:hasKeys() then
+        self.key_events = self.key_events or {}
+        self.key_events.MinimizeKey = { { "Back" }, event = "Minimize" }
+    end
+
     -- ── Mini-player bar (shown when minimized) ──
     self._mini_height = Screen:scaleBySize(44)
     local mini_btn_size = self._mini_height - 20  -- keep clear of the mini bar border
@@ -1134,7 +1174,17 @@ function AudiobookPlayer:_restore()
     -- Restore dimen to full screen so we receive all events again
     self.dimen.h = self.height
     self.dimen.y = 0
+    -- Key devices: show the focus on Play.
+    if self.layout and self.selected then
+        pcall(self.moveFocusTo, self, self.selected.x, self.selected.y,
+            FocusManager.FOCUS_ONLY_ON_NT)
+    end
     UIManager:setDirty("all", "full")
+end
+
+--- Open the full-screen player (from a gesture or key action).
+function AudiobookPlayer:openFull()
+    if self._minimized then self:_restore() end
 end
 
 function AudiobookPlayer:onChapterList()

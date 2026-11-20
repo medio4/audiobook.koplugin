@@ -549,6 +549,46 @@ function Audiobook:onDispatcherRegisterActions()
         title = _("Play audiobook from here"),
         reader = true,
     })
+    -- For devices driven by keys (and anyone who likes gestures): open the
+    -- full-screen player, and skip a narrated line either way.
+    Dispatcher:registerAction("audiobook_show_player", {
+        category = "none",
+        event = "AudiobookShowPlayer",
+        title = _("Open the full-screen Read-Along player"),
+        reader = true,
+    })
+    Dispatcher:registerAction("audiobook_line_back", {
+        category = "none",
+        event = "AudiobookLineBack",
+        title = _("Read-Along: previous line"),
+        reader = true,
+    })
+    Dispatcher:registerAction("audiobook_line_forward", {
+        category = "none",
+        event = "AudiobookLineForward",
+        title = _("Read-Along: next line"),
+        reader = true,
+    })
+end
+
+function Audiobook:onAudiobookShowPlayer()
+    local bar = self.media_sync and self.media_sync.playback_bar
+    if bar and bar.openFull then pcall(bar.openFull, bar) end
+    return true
+end
+
+function Audiobook:onAudiobookLineBack()
+    if self.media_sync and self.media_sync.skipLines then
+        pcall(self.media_sync.skipLines, self.media_sync, -1)
+    end
+    return true
+end
+
+function Audiobook:onAudiobookLineForward()
+    if self.media_sync and self.media_sync.skipLines then
+        pcall(self.media_sync.skipLines, self.media_sync, 1)
+    end
+    return true
 end
 
 --- Arrange list (KOReader's SortWidget: tap an item, move it with the
