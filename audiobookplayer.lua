@@ -4025,6 +4025,36 @@ function AudiobookPlayer:paintTo(bb, x, y)
             if not ok then logger.warn("AudiobookPlayer: re-hook failed:", err) end
         end)
     end
+    -- Lists can reach the screen without passing UIManager.show while we
+    -- watch it (ZenOS reuses its settings page, and a bar put back by
+    -- another path never registered itself on top). When what is on screen
+    -- changes, register the bar and fit any list under it. Cheap: compares
+    -- the stack's size and top before doing anything.
+    if self._minimized and not self._list_scan_pending then
+        local stack = UIManager._window_stack
+        local n = stack and #stack or 0
+        local sig = n .. ":" .. tostring(stack and stack[n] and stack[n].widget)
+        if sig ~= self._list_scan_sig then
+            self._list_scan_sig = sig
+            self._list_scan_pending = true
+            UIManager:nextTick(function()
+                self._list_scan_pending = nil
+                if not (self.visible and self._minimized) or self.suppressed then return end
+                if rawget(UIManager, "_audiobook_top_bar") ~= self then
+                    logger.warn("AudiobookPlayer: bar was not registered on top; registering")
+                    pcall(self._claimTop, self)
+                end
+                local st = UIManager._window_stack or {}
+                for i = 1, #st do
+                    local w = st[i].widget
+                    if type(w) == "table" and w ~= self and w.item_table then
+                        local ok, err = pcall(fitShownList, w)
+                        if not ok then logger.warn("AudiobookPlayer: list fit failed:", err) end
+                    end
+                end
+            end)
+        end
+    end
     if self._minimized then
         -- Draw only the mini player bar at bottom (optionally above status bar).
         -- UIManager's window.y for this widget is always 0 (set when first shown),
