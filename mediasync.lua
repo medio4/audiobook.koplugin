@@ -1046,6 +1046,9 @@ function MediaSync:stop(keep_chapter_menu, opts)
     if not track_transition and self.plugin and self.plugin._cancelOverlayLoad then
         pcall(self.plugin._cancelOverlayLoad, self.plugin, "stopped")
     end
+    if not track_transition and self.plugin then
+        self.plugin._play_from_page = nil
+    end
     local was_playing = self.state ~= self.STATE.STOPPED
     -- Sync ReaderRolling to the page actually shown before the stop
     -- re-renders, or the view snaps back to the session start.
@@ -1537,6 +1540,13 @@ end
 
 function MediaSync:resume(auto)
     if self.state ~= self.STATE.PAUSED then return end
+    -- Paused by turning back a page: Play starts from the page on screen.
+    if not auto and self.plugin and self.plugin._play_from_page
+            and self.plugin._resumeFromPage then
+        local ok, handled = pcall(self.plugin._resumeFromPage, self.plugin)
+        if ok and handled then return end
+        if not ok then logger.warn("MediaSync: resume from page failed:", handled) end
+    end
     -- Resume exactly on the SMIL timeline pause mark before starting audio.
     -- The _seek_offset/_paused_position writes are Android only for the same
     -- reason as in pause(): non-Android backends derive position from

@@ -1018,7 +1018,7 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("When enabled (default), the book view auto-turns to keep the current narration sentence on screen while you stay with the read-aloud. Manually turning a page never seeks or restarts audio: highlighting pauses and a “Return to read-aloud” cue appears until you jump back or the narration catches up."),
                     },
                     {
-                        text = _("Page turn skips the audiobook ahead"),
+                        text = _("Page turns move the audiobook"),
                         enabled_func = function() return (self.ui and self.ui.document) or false end,
                         checked_func = function()
                             return self:getSetting("page_turn_skips_audio", false)
@@ -1026,7 +1026,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("page_turn_skips_audio", false)
                         end,
-                        help_text = _("For books with a built-in audiobook: while it plays, turning to a later page than the one being read moves the audio to the first line of the new page. Turning back still only browses (the audio keeps its place and the “Return to read-aloud” cue appears). Off by default."),
+                        help_text = _("For books with a built-in audiobook, while it plays: turning to a later page than the one being read moves the audio to the first line of the new page. Turning back pauses it; Play then starts from the first line of the page you are on. Off by default."),
                     },
                     {
                         text = _("Keep the audiobook bar"),
@@ -4602,6 +4602,80 @@ function Audiobook:_skipAudioToTurnedPage()
     return true
 end
 
+--- Setting "Page turns move the audiobook": the reader turned back from
+--- the page being narrated. Pause, and make the next Play start from the
+--- first line of the page they are on then (_resumeFromPage).
+-- @treturn bool true when it paused
+function Audiobook:_pauseOnBackTurn()
+    local ms = self.media_sync
+    if not (ms and ms.overlay_mode and ms.timing_data and ms.media_engine
+            and ms.state == ms.STATE.PLAYING) then
+        return false
+    end
+    local ok_p, page = pcall(function() return self.ui.document:getCurrentPage() end)
+    page = ok_p and tonumber(page) or nil
+    local cur_page = page and ms:_entryPage(ms:_skipBase())
+    if not (page and cur_page and page < cur_page) then return false end
+    ms:_cancelSelection()
+    -- Browsing away first, so the pause does not turn the view back to the
+    -- line it paused on.
+    self._readaloud_browsing_away = true
+    ms:pause()
+    pcall(function() ms:clearSentenceHighlight() end)
+    self._play_from_page = true
+    logger.warn("Audiobook: turned back to page", page, "from", cur_page, "; paused")
+    local bar = ms.playback_bar
+    if bar and bar._showHint then
+        pcall(bar._showHint, bar, _("Paused. Play starts from this page."))
+    end
+    return true
+end
+
+--- Play after a back-turn pause: start from the first line of the page on
+--- screen instead of the pause mark. Called from MediaSync:resume.
+-- @treturn bool true when it took over the resume
+function Audiobook:_resumeFromPage()
+    if not self._play_from_page then return false end
+    self._play_from_page = nil
+    local ms = self.media_sync
+    if not (ms and ms.timing_data and ms.state == ms.STATE.PAUSED) then return false end
+    local ok_p, page = pcall(function() return self.ui.document:getCurrentPage() end)
+    page = ok_p and tonumber(page) or nil
+    if not page then return false end
+    -- First line of this audio part starting on (or running onto) the page.
+    local n = #ms.timing_data
+    local lo, hi, found = 1, n, nil
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        local p = ms:_entryPage(mid)
+        if not p then found = nil break end
+        if p >= page then found, hi = mid, mid - 1 else lo = mid + 1 end
+    end
+    if found and (ms:_entryPage(found) or page) > page and found > 1 then
+        found = found - 1
+    end
+    if found and (ms:_entryPage(1) or page) <= page then
+        self._readaloud_browsing_away = false
+        self:_hideReturnToReadAloudButton()
+        logger.warn("Audiobook: Play after a back turn: from line", found, "on page", page)
+        ms:resume()
+        ms._sel_idx = found
+        ms:_commitSelection()
+        return true
+    end
+    -- The page is in another audio part: restart there.
+    local entry = self:_entryOnCurrentPage(self._smil_parser, self._smil_timing_data)
+    local doc_path = self:_openDocPath()
+    if entry and entry.audio_path and doc_path then
+        self._readaloud_browsing_away = false
+        logger.warn("Audiobook: Play after a back turn: other part,",
+            entry.audio_path:match("([^/]+)$"), "t=", entry.start_time)
+        self:_startSmilPlayback(doc_path, entry, false)
+        return true
+    end
+    return false
+end
+
 function Audiobook:_handlePageTurnFollow()
     if not self._init_ok then return end
     if not self.media_sync then return end
@@ -4625,6 +4699,13 @@ function Audiobook:_handlePageTurnFollow()
         elseif skipped then
             self._readaloud_browsing_away = false
             self:_hideReturnToReadAloudButton()
+            return
+        end
+        -- A turn back pauses; the next Play starts from the page on screen.
+        local ok_b, paused = pcall(self._pauseOnBackTurn, self)
+        if not ok_b then
+            logger.warn("Audiobook: back-turn pause failed:", paused)
+        elseif paused then
             return
         end
     end
