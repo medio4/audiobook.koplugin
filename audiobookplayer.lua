@@ -1906,6 +1906,11 @@ function AudiobookPlayer:_buildLargeMiniBar()
     if self._mini_refocus and not choice_mode then
         table.insert(right_buttons, self._mini_refocus)
     end
+    if choice_mode then
+        -- Not on the bar now: drop them so a tap cannot hit where they were.
+        self._mini_refocus = nil
+        self._mini_line_back, self._mini_line_forward = nil, nil
+    end
 
     -- Whatever width the buttons actually take leaves the rest to the
     -- centred title stack (measured, so shrunk buttons give room back).
