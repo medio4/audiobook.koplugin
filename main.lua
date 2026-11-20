@@ -5516,6 +5516,7 @@ function Audiobook:_ensureAudiobookChromeMargins()
     end
 
     if already then
+        logger.warn("Audiobook: bar room already there; no new layout")
         self._audiobook_chrome_margins_applied = true
         return false
     end
@@ -5537,6 +5538,21 @@ function Audiobook:onPreRenderDocument()
     -- The bar does not exist yet: use the height it will be built with.
     local bar_h = Device.screen:scaleBySize(
         self:getSetting("large_mini_bar", false) and 76 or 44)
+    -- Diagnostic: anything else that sets the margins during this open
+    -- (a second layout), logged with who called it. A few lines at most.
+    if doc.setPageMargins and not doc._ab_margin_log then
+        local orig_set, n = doc.setPageMargins, 0
+        doc._ab_margin_log = true
+        doc.setPageMargins = function(d, l, t, r, b, ...)
+            n = n + 1
+            if n <= 6 then
+                local info = debug.getinfo(2, "Sl")
+                logger.warn("Audiobook: margins set", l, t, r, b, "by",
+                    info and (info.short_src .. ":" .. tostring(info.currentline)) or "?")
+            end
+            return orig_set(d, l, t, r, b, ...)
+        end
+    end
     local ok, err = pcall(self._applyAudiobookChromeMarginsLive, self, bar_h, true)
     if not ok then logger.warn("Audiobook: pre-layout bar room failed:", err) end
 end
@@ -5569,8 +5585,8 @@ function Audiobook:_applyAudiobookChromeMarginsLive(bar_h_override, before_rende
         self._audiobook_chrome_margins_applied = true
         -- Before the first layout there is no position to update yet.
         if not before_render then ui:handleEvent(Event:new("UpdatePos")) end
-        dlog("overlay-margin", before_render and "pre-render" or "live-set",
-            "bottom_px", bottom, "bar_h", bar_h)
+        logger.warn("Audiobook: bar room", before_render and "before first layout" or "now",
+            "bottom_px", bottom, "bar_h", bar_h, "footer reclaim", reclaim, "above", above)
         return true
     end
     return false
@@ -5586,6 +5602,7 @@ function Audiobook:_releaseAudiobookChromeMargins()
         end
     end
     self._audiobook_chrome_margins_applied = false
+    logger.warn("Audiobook: bar room released")
     local ui = self.ui
     if not ui then return end
     local ds = ui.doc_settings
