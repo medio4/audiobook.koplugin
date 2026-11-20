@@ -75,22 +75,66 @@ end
 
 -- ── Feedback after a change ──────────────────────────────────────────
 
+-- The tag: "⏸ holding 0.3 s" after a nudge later (the highlight stays on
+-- its line that much longer), "⏩ 0.3 s ahead" after a nudge earlier (it
+-- jumps forward now). Taps in a row add up in one tag. It is drawn once,
+-- a moment after the last tap, so the highlight has already moved and the
+-- tag lands on the right line; one small "fast" refresh to show it, one
+-- to clear it. No repaint while it is up.
+
+SyncUI.TAG_DELAY_S = 0.4 -- after the last tap: debounce + let the highlight move
+
+--- The tag's text for a net change of delta_ms.
+function SyncUI.tagText(delta_ms)
+    delta_ms = tonumber(delta_ms) or 0
+    local s = string.format("%.1f s", math.abs(delta_ms) / 1000)
+    if delta_ms > 0 then return "⏸ " .. T(_("holding %1"), s) end
+    if delta_ms < 0 then return "⏩ " .. T(_("%1 ahead"), s) end
+    return _("no change")
+end
+
+--- Where the tag goes: just after the end of the highlighted line; when
+--- that runs off the screen, just above the line's start; with no
+--- highlight on screen, above the bar.
+function SyncUI.tagPosition(boxes, w, h, screen_w, gap, fallback_y)
+    local last = boxes and boxes[#boxes]
+    if last then
+        local x = last.x + last.w + gap
+        local y = last.y + math.floor((last.h - h) / 2)
+        if x + w > screen_w then
+            local first = boxes[1]
+            x = math.max(0, math.min(screen_w - w, first.x))
+            y = first.y - h - gap
+            if y < 0 then y = last.y + last.h + gap end -- top line: below it
+        end
+        return x, math.max(0, y)
+    end
+    return math.floor((screen_w - w) / 2), math.max(0, fallback_y - h - gap)
+end
+
 local function closeTag(plugin)
     local t = plugin._sync_tag
-    if t then
-        plugin._sync_tag = nil
-        UIManager:unschedule(t.timer)
-        pcall(function() UIManager:close(t.widget, "ui", t.rect) end)
+    if not t then return end
+    plugin._sync_tag = nil
+    UIManager:unschedule(t.show)
+    UIManager:unschedule(t.close)
+    if t.widget then
+        local rect = t.rect
+        pcall(function()
+            UIManager:close(t.widget, "ui", rect)
+        end)
     end
 end
 
---- A small tag at the end of the highlighted line.
-local function showTag(plugin, delta_ms, total_ms)
-    closeTag(plugin)
+local function drawTag(plugin, tag)
+    if plugin._sync_tag ~= tag then return end
     local ms = plugin.media_sync
     local hm = ms and ms.highlight_manager
-    local boxes = hm and hm._pending_boxes
-    local text = (delta_ms > 0 and "⏸ " or "⏩ ") .. SyncUI.short(total_ms)
+    local boxes
+    if hm and hm._pending_boxes and hm._boxesMatchCurrentView
+            and hm:_boxesMatchCurrentView() then
+        boxes = hm._pending_boxes
+    end
     local frame = FrameContainer:new{
         toast = true,
         _plugin_chrome = true,
@@ -98,32 +142,43 @@ local function showTag(plugin, delta_ms, total_ms)
         bordersize = Size.border.thin,
         radius = Screen:scaleBySize(6),
         padding = Size.padding.small,
-        TextWidget:new{ text = text, face = Font:getFace("cfont", 14), bold = true },
+        TextWidget:new{ text = SyncUI.tagText(tag.delta), face = Font:getFace("cfont", 14), bold = true },
     }
     local size = frame:getSize()
-    local x, y
-    local last = boxes and boxes[#boxes]
-    if last then
-        x = last.x + last.w + Screen:scaleBySize(6)
-        y = last.y + math.floor((last.h - size.h) / 2)
-        if x + size.w > Screen:getWidth() then
-            -- No room after the line: just above its start.
-            x = math.max(0, math.min(Screen:getWidth() - size.w, boxes[1].x))
-            y = math.max(0, boxes[1].y - size.h - Screen:scaleBySize(4))
-        end
-    else
-        -- Highlight not on screen: above the bar.
-        local bar = ms and ms.playback_bar
-        x = math.floor((Screen:getWidth() - size.w) / 2)
-        y = (bar and bar._miniBarY and bar:_miniBarY() or Screen:getHeight()) - size.h - Screen:scaleBySize(8)
+    local bar = ms and ms.playback_bar
+    local bar_y = Screen:getHeight()
+    if bar and bar._miniBarY then
+        local ok, y = pcall(bar._miniBarY, bar)
+        if ok and type(y) == "number" then bar_y = y end
     end
-    local rect = Geom:new{ x = x, y = y, w = size.w, h = size.h }
-    local tag = { widget = frame, rect = rect }
-    tag.timer = function() if plugin._sync_tag == tag then closeTag(plugin) end end
-    plugin._sync_tag = tag
-    UIManager:show(frame, "fast", rect, x, y)
-    UIManager:scheduleIn(SyncUI.FEEDBACK_S, tag.timer)
+    local x, y = SyncUI.tagPosition(boxes, size.w, size.h, Screen:getWidth(),
+        Screen:scaleBySize(6), bar_y)
+    if tag.widget then
+        -- Already up (a tap while it showed): swap in place.
+        pcall(function() UIManager:close(tag.widget, "fast", tag.rect) end)
+    end
+    tag.widget = frame
+    tag.rect = Geom:new{ x = x, y = y, w = size.w, h = size.h }
+    UIManager:show(frame, "fast", tag.rect, x, y)
+    UIManager:unschedule(tag.close)
+    UIManager:scheduleIn(SyncUI.FEEDBACK_S, tag.close)
 end
+
+--- Show (or add to) the tag after a change of delta_ms.
+local function showTag(plugin, delta_ms)
+    local tag = plugin._sync_tag
+    if not tag then
+        tag = { delta = 0 }
+        tag.show = function() drawTag(plugin, tag) end
+        tag.close = function() if plugin._sync_tag == tag then closeTag(plugin) end end
+        plugin._sync_tag = tag
+    end
+    tag.delta = tag.delta + delta_ms
+    UIManager:unschedule(tag.show)
+    UIManager:scheduleIn(SyncUI.TAG_DELAY_S, tag.show)
+end
+
+SyncUI._closeTag = closeTag
 
 --- Outline style and word lighting for a few seconds, then back.
 local function startAdjustLook(plugin)
@@ -154,7 +209,7 @@ end
 --- Called after the offset changed by delta_ms (now total_ms).
 function SyncUI.afterChange(plugin, delta_ms, total_ms)
     pcall(startAdjustLook, plugin)
-    local ok, err = pcall(showTag, plugin, delta_ms, total_ms)
+    local ok, err = pcall(showTag, plugin, delta_ms)
     if not ok then logger.warn("SyncUI: tag failed:", err) end
 end
 
