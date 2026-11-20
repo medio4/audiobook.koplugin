@@ -3373,6 +3373,25 @@ local function installMenuFit()
             return orig(m, ...)
         end
     end
+    -- Full-screen pages that size themselves (ZenOS's settings page sets
+    -- its own height to the screen and counts rows from available_height
+    -- after Menu._recalculateDimen): take the part under the bar out of
+    -- available_height, so they put fewer rows on a page.
+    if ok_m and Menu and Menu._recalculateDimen then
+        local orig_recalc = Menu._recalculateDimen
+        Menu._recalculateDimen = function(m, ...)
+            local r = orig_recalc(m, ...)
+            local ok, y = pcall(menuRoomAboveBar)
+            local d = m.dimen
+            if ok and y and d and d.h and m.available_height then
+                local bottom = (d.y or 0) + d.h
+                if bottom > y then
+                    m.available_height = math.max(0, m.available_height - (bottom - y))
+                end
+            end
+            return r
+        end
+    end
 end
 
 local function installTopHook()
