@@ -5442,7 +5442,14 @@ function Audiobook:_holdPlaysFromWord(h)
         return false
     end
     if h.selected_text.text:find("%s") then return false end
-    if not self:_hasMediaOverlays() then return false end
+    -- Only once this book's audiobook is loaded (parsed and armed or
+    -- playing); before that, and while it is still loading, a hold does
+    -- what it always did.
+    local doc_path = self:_openDocPath()
+    if not (doc_path and self._smil_timing_data and self._smil_doc_path == doc_path) then
+        return false
+    end
+    if self._overlay_job then return false end
     local sel = h.selected_text
     logger.warn("Audiobook: hold on a word plays from there:", sel.text)
     if h._resetHoldTimer then pcall(h._resetHoldTimer, h, true) end
