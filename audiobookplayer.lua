@@ -1023,7 +1023,7 @@ function AudiobookPlayer:setupUI()
         if #lines > 0 then
             self._tts_info_idx = 1
             if self._mini_title then
-                self._mini_title:setText(lines[1])
+                self:_fitMiniTitle(lines[1])
             end
         end
     end
@@ -1438,7 +1438,7 @@ function AudiobookPlayer:setLoadingText(text)
     self._loading_text = text
     self.current_time_str = text or ""
     if self.time_widget then self.time_widget:setText(self.current_time_str) end
-    if self._mini_time then self._mini_time:setText(self.current_time_str) end
+    if self._mini_time then self:_fitMiniTime(self.current_time_str) end
     -- The text changes width: repaint the whole bar, not the old clock rect.
     UIManager:setDirty(self, self:_isEink() and "fast" or "ui")
 end
@@ -1458,7 +1458,7 @@ function AudiobookPlayer:updateTimeDisplay(current_sec, total_sec, force)
     self.current_time_str = text
     self.time_widget:setText(text)
     if self._mini_time then
-        self._mini_time:setText(text)
+        self:_fitMiniTime(text)
     end
     if self._minimized then
         self:_dirtyChrome(self:_miniTimeDirtyRegion())
@@ -2124,6 +2124,10 @@ function AudiobookPlayer:_buildLargeMiniBar()
     used = used + Size.line.medium + gap + width_of(self._mini_close) + gap
     used = used + gap -- around the centre stack
     local center_max_width = math.max(mini_btn_size, self.width - used)
+    -- Later text (clock, loading lines, TTS info) is fitted to this width.
+    self._mini_center_w = center_max_width
+    self._mini_time_fit_key = nil
+    self._mini_title_fit_text = nil
 
     -- Title and time always fit: the largest font that fits on one line,
     -- else the title wraps onto two lines (ellipsis only past that).
@@ -2437,7 +2441,7 @@ function AudiobookPlayer:_applyVolume(delta)
     -- When minimized, flash the level in the mini time slot (the volume row
     -- itself is off-screen).  While expanded the volume widget shows it.
     if self._minimized and self._mini_time then
-        self._mini_time:setText(string.format("vol %d%%", pct))
+        self:_fitMiniTime(string.format("vol %d%%", pct))
     end
     UIManager:setDirty(self, function()
         if self._minimized then return "ui", self.dimen end
@@ -2573,6 +2577,46 @@ function AudiobookPlayer:_miniTitleText()
     return track
 end
 
+--- Largest font size from `sizes` at which `text` fits `max_w`.
+local function fitSize(text, sizes, max_w, bold)
+    for _i, size in ipairs(sizes) do
+        local probe = TextWidget:new{ text = text, face = Font:getFace("cfont", size), bold = bold }
+        local w = probe:getSize().w
+        probe:free()
+        if w <= max_w then return size end
+    end
+    return sizes[#sizes]
+end
+
+--- Set the bar's second line (clock, loading progress, volume) so it always
+--- fits: re-fitted whenever the text's length changes (the clock ticking at
+--- the same length costs nothing extra).
+function AudiobookPlayer:_fitMiniTime(text)
+    local t = self._mini_time
+    if not t then return end
+    text = text or ""
+    local max_w = self.large_mini_bar and self._mini_center_w
+    if max_w and self._mini_time_fit_key ~= #text then
+        self._mini_time_fit_key = #text
+        t.face = Font:getFace("cfont", fitSize(text, { 15, 14, 13, 12, 11, 10 }, max_w))
+    end
+    t:setText(text)
+end
+
+--- Set the bar's title line so it always fits (one line: shrink; the
+--- two-line box wraps by itself).
+function AudiobookPlayer:_fitMiniTitle(text)
+    local t = self._mini_title
+    if not t then return end
+    text = text or ""
+    local max_w = self.large_mini_bar and self._mini_center_w
+    if max_w and not t.line_height_px and self._mini_title_fit_text ~= text then
+        self._mini_title_fit_text = text
+        t.face = Font:getFace("cfont", fitSize(text, { 17, 15, 13, 12, 11 }, max_w, true))
+    end
+    t:setText(text)
+end
+
 function AudiobookPlayer:_updateMiniWidgets()
     local track = self:_miniTitleText()
     -- Large bar: its title is sized to fit when built, so new text means
@@ -2590,10 +2634,10 @@ function AudiobookPlayer:_updateMiniWidgets()
     -- TTS owns its center line through the context cycler (see
     -- _scheduleTtsInfo); do not clobber it with the chapter/track name.
     if self._mini_title and not self.tts_mode and self._mini_title_built_text ~= track then
-        self._mini_title:setText(track)
+        self:_fitMiniTitle(track)
     end
     if self._mini_time then
-        self._mini_time:setText(self.current_time_str or "")
+        self:_fitMiniTime(self.current_time_str or "")
     end
     self:_refreshPlayButton(self._mini_play_pause)
     if self._mini_speed then
@@ -2694,7 +2738,7 @@ function AudiobookPlayer:_scheduleTtsInfo()
         end
         self._tts_info_idx = ((self._tts_info_idx or 0) % #lines) + 1
         if self._mini_title then
-            self._mini_title:setText(lines[self._tts_info_idx])
+            self:_fitMiniTitle(lines[self._tts_info_idx])
         end
         UIManager:setDirty(self, function()
             return "ui", self._minimized and self.dimen or nil
