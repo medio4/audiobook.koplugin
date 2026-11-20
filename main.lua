@@ -203,9 +203,9 @@ function Audiobook:init()
     -- by _registerDictButtons on KOReader >= 2026.07 and by the legacy
     -- onDictButtonsReady event handler on older releases).
     if self.ui.highlight and self.ui.highlight.addToHighlightDialog then
-        self.ui.highlight:addToHighlightDialog("15_read_aloud", function(this)
+        self.ui.highlight:addToHighlightDialog("00b_audiobook_read_aloud", function(this)
             return {
-                text = _("Read aloud from here"),
+                text = "\239\128\168  " .. _("Read aloud"),
                 callback = function()
                     if not self._init_ok then
                         self:_showInitError()
@@ -231,9 +231,9 @@ function Audiobook:init()
                 end,
             }
         end)
-        self.ui.highlight:addToHighlightDialog("16_play_aligned", function(this)
+        self.ui.highlight:addToHighlightDialog("00a_audiobook_play", function(this)
             return {
-                text = _("Play aligned audiobook from here"),
+                text = "\239\128\165  " .. _("Play audiobook"),
                 callback = function()
                     if not self._init_ok then
                         self:_showInitError()
@@ -273,9 +273,10 @@ function Audiobook:_registerDictButtons()
 
     self.ui.dictionary:addToDictButtons({
         id = "audiobook_read",
-        text = _("Read aloud from here"),
+        text = "\239\128\168  " .. _("Read aloud"),
         font_bold = false,
         conditional = true,
+        row_group = "audiobook",
         show_func = function(dict_popup)
             return plugin._init_ok and not dict_popup.is_wiki
                 and not dict_popup.is_wiki_fullpage
@@ -309,9 +310,10 @@ function Audiobook:_registerDictButtons()
 
     self.ui.dictionary:addToDictButtons({
         id = "audiobook_play_aligned",
-        text = _("Play aligned audiobook from here"),
+        text = "\239\128\165  " .. _("Play audiobook"),
         font_bold = false,
         conditional = true,
+        row_group = "audiobook",
         show_func = function(dict_popup)
             return plugin._init_ok and not dict_popup.is_wiki
                 and not dict_popup.is_wiki_fullpage
