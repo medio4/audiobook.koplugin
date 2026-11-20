@@ -4744,7 +4744,9 @@ end
 --- screen instead of the pause mark. Called from MediaSync:resume.
 -- @treturn bool true when it took over the resume
 function Audiobook:_resumeFromPage(mode)
-    if not (self._play_from_page or mode) then return false end
+    local browsed = self._readaloud_browsing_away
+        and self:getSetting("page_turn_skips_audio", false)
+    if not (self._play_from_page or mode or browsed) then return false end
     self._play_from_page = nil
     local ms = self.media_sync
     if not (ms and ms.timing_data and ms.state == ms.STATE.PAUSED) then return false end

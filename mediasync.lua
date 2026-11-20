@@ -1540,9 +1540,14 @@ end
 
 function MediaSync:resume(auto)
     if self.state ~= self.STATE.PAUSED then return end
-    -- Paused by turning back a page: Play starts from the page on screen.
-    if not auto and self.plugin and self.plugin._play_from_page
-            and self.plugin._resumeFromPage then
+    -- Paused by turning back a page, or paused and then browsed to another
+    -- page with page turns moving the audiobook: the back-turn setting
+    -- decides where Play continues.
+    local p = self.plugin
+    local browsed = p and p._readaloud_browsing_away and p.getSetting
+        and p:getSetting("page_turn_skips_audio", false)
+    if not auto and p and (p._play_from_page or browsed)
+            and p._resumeFromPage then
         local ok, handled = pcall(self.plugin._resumeFromPage, self.plugin)
         if ok and handled then return end
         if not ok then logger.warn("MediaSync: resume from page failed:", handled) end
