@@ -3313,10 +3313,16 @@ local STAY_BELOW = { VirtualKeyboard = true, ScreenSaver = true, ScreenSaverLock
 --- where the user dragged it out of the way).
 local function menuRoomAboveBar()
     local bar = rawget(UIManager, "_audiobook_top_bar")
-    if not (bar and bar.visible and bar._minimized) or bar.suppressed then return nil end
+    if not bar then UIManager._audiobook_fit_why = "no bar claimed"; return nil end
+    if not (bar.visible and bar._minimized) or bar.suppressed then
+        UIManager._audiobook_fit_why = string.format("bar visible=%s minimized=%s suppressed=%s",
+            tostring(bar.visible), tostring(bar._minimized), tostring(bar.suppressed))
+        return nil
+    end
     local p = bar.plugin
     if p and p.getSetting and not (p:getSetting("floating_enabled", true)
             and p:getSetting("bar_over_menus", true)) then
+        UIManager._audiobook_fit_why = "floating/over-menus off"
         return nil
     end
     local y
@@ -3325,7 +3331,11 @@ local function menuRoomAboveBar()
     else
         y = bar:_dockedBarY()
     end
-    if not y or y < bar.height / 2 then return nil end
+    if not y or y < bar.height / 2 then
+        UIManager._audiobook_fit_why = "bar in upper half y=" .. tostring(y)
+        return nil
+    end
+    UIManager._audiobook_fit_why = nil
     return y
 end
 
@@ -3402,11 +3412,20 @@ local function installMenuFit()
             local r = orig_recalc(m, ...)
             local ok, y = pcall(menuRoomAboveBar)
             local d = m.dimen
+            local before = m.available_height
             if ok and y and d and d.h and m.available_height then
                 local bottom = (d.y or 0) + d.h
                 if bottom > y then
                     m.available_height = math.max(0, m.available_height - (bottom - y))
                 end
+            end
+            -- Diagnostic (once per page kind): why a page did or did not fit.
+            local key = tostring(m.name) .. ":" .. tostring(y)
+            if UIManager._audiobook_fit_logged ~= key then
+                UIManager._audiobook_fit_logged = key
+                logger.warn("AudiobookPlayer: menu fit", m.name, "bar y", y,
+                    "dimen", d and d.y, d and d.h, "available", before, "->", m.available_height,
+                    UIManager._audiobook_fit_why or "")
             end
             return r
         end
