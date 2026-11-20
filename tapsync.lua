@@ -204,6 +204,11 @@ function TapSync.start(plugin, on_done)
         return
     end
     local bar = ms.playback_bar
+    -- The tap is on the page: get the full-screen player out of the way.
+    if bar and not bar._minimized and bar.onMinimize then
+        local ok, err = pcall(bar.onMinimize, bar)
+        if not ok then logger.warn("TapSync: minimize failed:", err) end
+    end
     local function hint(text, keep)
         if bar and bar._showHint then
             pcall(bar._showHint, bar, text)
