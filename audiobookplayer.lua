@@ -3534,7 +3534,15 @@ local function installMenuFit()
             local ok, y = pcall(menuRoomAboveBar)
             local screen_h = Screen:getHeight()
             if ok and y and (not m.height or m.height >= screen_h) then
-                m.height = math.max(math.floor(screen_h / 2), 2 * y - screen_h)
+                if rawget(m, "covers_fullscreen") then
+                    -- A full-screen page shown at the top (ZenOS settings):
+                    -- it can run all the way down to the bar.
+                    m.height = y
+                else
+                    -- Usually centred in a screen-sized container (table of
+                    -- contents...): it loses the bar's height at both ends.
+                    m.height = math.max(math.floor(screen_h / 2), 2 * y - screen_h)
+                end
             end
             return orig(m, ...)
         end
