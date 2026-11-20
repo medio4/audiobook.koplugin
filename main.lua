@@ -5592,6 +5592,34 @@ end
 --- audiobook from that sentence instead. Long holds and hold-drag
 --- selections go to KOReader as usual. Wraps this reader's
 --- ReaderHighlight:onHoldRelease, whose gesture handler calls it as a method.
+--- Setting "Page turns move the audio": a turn back pauses, but the pause
+--- only runs once the new page is drawn. Meanwhile the narration could
+--- reach its next line and turn the page forward again, and that turn
+--- hid the user's one, so it kept playing. Mark the user as browsing as
+--- soon as the turn back is asked for, before the page is drawn, so the
+--- narration does not turn the page in between.
+function Audiobook:_installBackTurnGuard()
+    local plugin = self
+    for _i, key in ipairs({ "rolling", "paging" }) do
+        local mod = self.ui and self.ui[key]
+        if mod and not mod._audiobook_back_guard and type(mod.onGotoViewRel) == "function" then
+            mod._audiobook_back_guard = true
+            local orig = mod.onGotoViewRel
+            mod.onGotoViewRel = function(m, diff, ...)
+                if type(diff) == "number" and diff < 0
+                        and (plugin._media_sync_page_follow_count or 0) == 0
+                        and plugin:getSetting("page_turn_skips_audio", false) then
+                    local ms = plugin.media_sync
+                    if ms and ms.overlay_mode and ms.state == ms.STATE.PLAYING then
+                        plugin._readaloud_browsing_away = true
+                    end
+                end
+                return orig(m, diff, ...)
+            end
+        end
+    end
+end
+
 function Audiobook:_installHoldToPlay()
     local hl = self.ui and self.ui.highlight
     if not hl or hl._audiobook_hold_to_play then return end
@@ -5639,6 +5667,7 @@ function Audiobook:onReaderReady()
     pcall(self._reattachFloating, self)
     if not self._init_ok or not self.media_sync then return end
     pcall(self._installHoldToPlay, self)
+    pcall(self._installBackTurnGuard, self)
     if not self:getSetting("keep_media_overlay_bar", false) then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
     local ds = self.ui.doc_settings
