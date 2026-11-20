@@ -1758,7 +1758,7 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- and the side buttons shrink to leave the title room.
     local choice_mode = line_skip and self._return_hint_active and self.on_return_choice_kind
         and true or false
-    local side_size = choice_mode and math.floor(mini_btn_size * 0.72) or mini_btn_size
+    local side_size = mini_btn_size
 
     local function miniButton(icon, text, font_size, callback)
         if icon then
@@ -1835,38 +1835,37 @@ function AudiobookPlayer:_buildLargeMiniBar()
     if choice_mode then
         -- One outlined box, split into segments (like the play button grown
         -- sideways): paused, play here / resume / back; playing, pause / back.
-        local seg_min = math.floor(play_w * 0.7)
-        local seg_pad = Screen:scaleBySize(10)
-        local function choice(text, kind)
-            -- Each segment as wide as its label (on one line), so "Resume"
-            -- does not wrap under its icon.
+        -- Equal segments, each as wide as the longest one-line label.
+        local specs
+        if self.is_playing then
+            specs = { { "⏸ " .. _("Pause"), "pause" }, { "↩ " .. _("Back"), "back" } }
+        else
+            specs = { { "▶ " .. _("Here"), "page" }, { "▶ " .. _("Resume"), "mark" },
+                      { "↩ " .. _("Back"), "back" } }
+        end
+        local seg_font = 15
+        local seg_pad = Screen:scaleBySize(12)
+        local seg_w = math.floor(play_w * 0.7)
+        for _i, s in ipairs(specs) do
             local probe = TextWidget:new{
-                text = text, face = Font:getFace("cfont", 15), bold = true,
+                text = s[1], face = Font:getFace("cfont", seg_font), bold = true,
             }
-            local seg_w = math.max(seg_min, probe:getSize().w + 2 * seg_pad)
+            seg_w = math.max(seg_w, probe:getSize().w + 2 * seg_pad)
             probe:free()
-            return Button:new{
-                text = text,
+        end
+        self._mini_choice_buttons = {}
+        for _i, s in ipairs(specs) do
+            local kind = s[2]
+            table.insert(self._mini_choice_buttons, Button:new{
+                text = s[1],
                 width = seg_w,
                 height = play_h,
-                text_font_size = 15,
+                text_font_size = seg_font,
                 text_font_bold = true,
                 bordersize = 0,
                 callback = function() self.on_return_choice_kind(kind) end,
                 show_parent = self,
-            }
-        end
-        if self.is_playing then
-            self._mini_choice_buttons = {
-                choice("⏸ " .. _("Pause"), "pause"),
-                choice("↩ " .. _("Back"), "back"),
-            }
-        else
-            self._mini_choice_buttons = {
-                choice("▶ " .. _("Here"), "page"),
-                choice("▶ " .. _("Resume"), "mark"),
-                choice("↩ " .. _("Back"), "back"),
-            }
+            })
         end
         local seg_items = { align = "center" }
         for i, b in ipairs(self._mini_choice_buttons) do
@@ -1893,14 +1892,18 @@ function AudiobookPlayer:_buildLargeMiniBar()
     if self._mini_chapters then
         table.insert(left_buttons, self._mini_chapters)
     end
-    if not self.tts_mode and self.on_volume then
+    -- While the ways back show, volume and ◎ step aside: Back does what ◎
+    -- does, and the bar stays readable.
+    if not self.tts_mode and self.on_volume and not choice_mode then
         self._mini_vol_minus = miniButton("volume.down", "♪−", 17, function() self:_applyVolume(-10) end)
         self._mini_vol_plus = miniButton("volume.up", "♪+", 17, function() self:_applyVolume(10) end)
         local vol_list = line_skip and right_buttons or left_buttons
         table.insert(vol_list, self._mini_vol_minus)
         table.insert(vol_list, self._mini_vol_plus)
+    else
+        self._mini_vol_minus, self._mini_vol_plus = nil, nil
     end
-    if self._mini_refocus then
+    if self._mini_refocus and not choice_mode then
         table.insert(right_buttons, self._mini_refocus)
     end
 
