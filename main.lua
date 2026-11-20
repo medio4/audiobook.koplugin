@@ -846,6 +846,33 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default.\n\nTo use another gesture instead, leave this off and bind \"Play audiobook from here\" in Settings > Taps and gestures > Gesture manager."),
                     },
                     {
+                        text_func = function()
+                            local n = self:getSetting("line_skip_count", 1)
+                            if n == 1 then return _("Line buttons move: 1 line") end
+                            return T(_("Line buttons move: %1 lines"), n)
+                        end,
+                        keep_menu_open = true,
+                        callback = function(touchmenu_instance)
+                            local SpinWidget = require("ui/widget/spinwidget")
+                            UIManager:show(SpinWidget:new{
+                                title_text = _("Lines per tap"),
+                                info_text = _("How many lines the previous / next line buttons move per tap."),
+                                value = self:getSetting("line_skip_count", 1),
+                                value_min = 1,
+                                value_max = 50,
+                                value_step = 1,
+                                value_hold_step = 5,
+                                default_value = 1,
+                                ok_text = _("Set"),
+                                callback = function(spin)
+                                    self:setSetting("line_skip_count", spin.value)
+                                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                                end,
+                            })
+                        end,
+                        help_text = _("For books with a built-in audiobook: how many narrated lines the previous / next line buttons move per tap, on the bar, the full-screen player and the floating player, and for the \"Read-Along: previous/next line\" gestures. Holding a line button still jumps a page. Default 1."),
+                    },
+                    {
                         text = _("Auto-advance pages"),
                         enabled_func = function() return (self.ui and self.ui.document) or false end,
                         checked_func = function()
