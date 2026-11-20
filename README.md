@@ -62,19 +62,22 @@ Some of these were added recently and are still being tried on real devices, so 
 
 ## Use
 
-- **Built-in audiobook:** open the book, then **Tools > Audiobook Read-Along > Play aligned/enriched audiobook**, or long-press a word and pick **Play aligned audiobook from here**.
-- **Text-to-speech:** long-press a word or select text and pick **Read aloud from here**, or **Tools > Audiobook Read-Along > Start Text-to-Speech from current page**.
-- **Audio files:** **Play unaligned audiobook** or **Start music playlist** in the same menu.
+- **Built-in audiobook:** open the book, then **Tools > Audiobook Read-Along > Play audiobook**, or long-press a word and pick **Play aligned audiobook from here**.
+- **Text-to-speech:** long-press a word or select text and pick **Read aloud from here**, or **Tools > Audiobook Read-Along > Read aloud (text-to-speech) from this page**.
+- **Audio files:** **Other audio > Play unaligned audiobook** or **Start music playlist** in the same menu.
 
 Settings live in **Tools > Audiobook Read-Along**:
 
 | Where | What |
 |-------|------|
-| Bluetooth settings | Pair and connect, headset buttons, auto reconnect, disconnect alert |
+| Reading & sync | Follow narration page, page turns move the audiobook, after turning back Play starts from, hold a word to play from there, auto-advance, pause when a menu opens, sync offset |
+| Highlighting | Sentences, words, style, group short cues |
+| Player bar | Keep the bar, large bar, **Floating player** (Enable, Appear when leaving the book, Appear over in-book menus), hide controls/progress, status bars, page margins, line-by-line view |
+| Bluetooth & headset | Pair and connect, headset buttons, auto reconnect, connect as soon as Play is pressed, disconnect alert |
 | Voice settings | Engine, voice, speed, pitch, volume, pauses |
-| General settings | Highlighting, page turns, sleep timer, player bar size, line-by-line view, sync offset |
-| General settings > Floating player | **Enable**, **Appear when leaving the book** (off by default), **Appear over in-book menus** (on by default) |
-| General settings > When holding a book | The library buttons above (both off by default) |
+| Sleep & lid | Sleep timer, sleep the device when it ends, keep playing with the lid closed |
+| When holding a book | The library buttons above (both off by default) |
+| Advanced | Audio output options, session recorder, benchmark, bug report, updates, about |
 
 ## Troubleshooting
 
