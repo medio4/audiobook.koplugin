@@ -279,6 +279,17 @@ function AudiobookPlayer:setupUI()
     self.sleep_timer_button = self:_iconButton("timer", "⏲", top_size,
         function() self:onSleepTimer() end)
 
+    -- Read-along: go back to the line being read (close the player, turn
+    -- the book to that line). Lives here, not on the bar, where Back does it.
+    if self.on_refocus then
+        self.locate_button = self:_iconButton("locate", "◎", top_size, function()
+            self:onMinimize()
+            self:onRefocus()
+        end)
+    else
+        self.locate_button = nil
+    end
+
     self.speed_button = Button:new{
         text = self:_speedText(),
         width = top_size,
@@ -335,6 +346,7 @@ function AudiobookPlayer:setupUI()
     if self.show_loop then visible_buttons = visible_buttons + 1 end
     if self.show_fix_audio then visible_buttons = visible_buttons + 1 end
     if self.tts_mode then visible_buttons = visible_buttons + 1 end
+    if self.locate_button then visible_buttons = visible_buttons + 1 end
     -- The title wraps onto a second line (ellipsis after that) instead of
     -- being cut from the left on one line.
     local title_w = self.width - top_size * visible_buttons - spacing * visible_buttons
@@ -366,6 +378,10 @@ function AudiobookPlayer:setupUI()
         self.sleep_timer_button,
         HorizontalSpan:new{ width = math.floor(spacing / 2) },
     }
+    if self.locate_button then
+        table.insert(top_row_items, self.locate_button)
+        table.insert(top_row_items, HorizontalSpan:new{ width = math.floor(spacing / 2) })
+    end
     if self.show_shuffle then
         table.insert(top_row_items, self.shuffle_button)
         table.insert(top_row_items, HorizontalSpan:new{ width = math.floor(spacing / 2) })
@@ -1737,7 +1753,6 @@ AudiobookPlayer.BAR_ITEMS = {
     { id = "sync_plus",    label = function() return _("Sync later") end },
     { id = "vol_down",     label = function() return _("Volume down") end },
     { id = "vol_up",       label = function() return _("Volume up") end },
-    { id = "locate",       label = function() return _("Go to the read-along line") end },
     { id = "speed",        label = function() return _("Speed (text-to-speech)") end },
     { id = "settings",     label = function() return _("Settings (text-to-speech)") end },
 }
@@ -1835,7 +1850,7 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- Count the buttons this bar will carry so they can shrink together on
     -- narrow screens instead of squeezing the title to nothing.
     local n_buttons = 1 -- close
-    if self.on_refocus then n_buttons = n_buttons + 1 end
+    -- (◎ is not on the large bar; see below.)
     if show_chapters then n_buttons = n_buttons + 1 end
     if self.tts_mode or show_sync then n_buttons = n_buttons + 2 end
     if not self.tts_mode and self.on_volume then n_buttons = n_buttons + 2 end
@@ -2004,12 +2019,11 @@ function AudiobookPlayer:_buildLargeMiniBar()
     else
         self._mini_vol_minus, self._mini_vol_plus = nil, nil
     end
-    if self._mini_refocus and not choice_mode then
-        table.insert(right_buttons, self._mini_refocus)
-    end
+    -- ◎ (go to the read-along line) is not on the large bar: Back does it
+    -- off the page, and the full-screen player carries it for the rest.
+    self._mini_refocus = nil
     if choice_mode then
         -- Not on the bar now: drop them so a tap cannot hit where they were.
-        self._mini_refocus = nil
         self._mini_line_back, self._mini_line_forward = nil, nil
     end
 
@@ -2026,7 +2040,6 @@ function AudiobookPlayer:_buildLargeMiniBar()
             sync_plus = show_sync and self._mini_sync_plus or nil,
             vol_down = self._mini_vol_minus,
             vol_up = self._mini_vol_plus,
-            locate = (not choice_mode) and self._mini_refocus or nil,
             speed = self.tts_mode and self._mini_speed or nil,
             settings = self.tts_mode and self._mini_settings or nil,
         }
@@ -3056,6 +3069,9 @@ function AudiobookPlayer:handleEvent(event)
             if self.sync_minus_button then
                 table.insert(buttons, self.sync_minus_button)
                 table.insert(buttons, self.sync_plus_button)
+            end
+            if self.locate_button then
+                table.insert(buttons, 1, self.locate_button)
             end
             if self.line_back_button then
                 table.insert(buttons, self.line_back_button)
