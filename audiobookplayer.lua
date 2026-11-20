@@ -2638,9 +2638,21 @@ local function fitSize(text, sizes, max_w, bold)
         local probe = TextWidget:new{ text = text, face = Font:getFace("cfont", size), bold = bold }
         local w = probe:getSize().w
         probe:free()
-        if w <= max_w then return size end
+        if w <= max_w then return size, true end
     end
-    return sizes[#sizes]
+    return sizes[#sizes], false
+end
+
+--- Shorter forms of the bar's second line, for when it does not fit even
+--- at the smallest size: without the word "audiobook" ("Loading…"), then
+--- just the numbers ("3 / 10").
+local function trimLine(text, how)
+    if how == "word" then
+        return (text:gsub("%s*" .. _("audiobook"):gsub("%p", "%%%0"), "", 1))
+    elseif how == "nums" then
+        return text:match("%d+%s*/%s*%d+") or text
+    end
+    return text
 end
 
 --- Set the bar's second line (clock, loading progress, volume) so it always
@@ -2651,10 +2663,23 @@ function AudiobookPlayer:_fitMiniTime(text)
     if not t then return end
     text = text or ""
     local max_w = self.large_mini_bar and self._mini_center_w
+    -- Keyed by length, so the ticking clock is not measured every second.
     if max_w and self._mini_time_fit_key ~= #text then
         self._mini_time_fit_key = #text
-        t.face = Font:getFace("cfont", fitSize(text, { 15, 14, 13, 12, 11, 10 }, max_w))
+        local sizes = { 15, 14, 13, 12, 11, 10 }
+        local size, fits = fitSize(text, sizes, max_w)
+        self._mini_time_trim = nil
+        for _i, how in ipairs({ "word", "nums" }) do
+            if fits then break end
+            local short = trimLine(text, how)
+            if short ~= text then
+                size, fits = fitSize(short, sizes, max_w)
+                self._mini_time_trim = how
+            end
+        end
+        t.face = Font:getFace("cfont", size)
     end
+    if max_w and self._mini_time_trim then text = trimLine(text, self._mini_time_trim) end
     t:setText(text)
     local stack = self._mini_center_stack
     if stack and stack.resetLayout then stack:resetLayout() end
@@ -2669,7 +2694,7 @@ function AudiobookPlayer:_fitMiniTitle(text)
     local max_w = self.large_mini_bar and self._mini_center_w
     if max_w and not t.line_height_px and self._mini_title_fit_text ~= text then
         self._mini_title_fit_text = text
-        t.face = Font:getFace("cfont", fitSize(text, { 17, 15, 13, 12, 11 }, max_w, true))
+        t.face = Font:getFace("cfont", (fitSize(text, { 17, 15, 13, 12, 11 }, max_w, true)))
     end
     t:setText(text)
     local stack = self._mini_center_stack
@@ -3496,11 +3521,30 @@ local function fitShownList(w)
     end
 end
 
+--- Wrap UIManager.show / close, and wrap them again whenever something
+--- puts back an older copy (ZenOS swaps UIManager.show while it runs a
+--- KOReader menu item, then restores the one it saw first, which dropped
+--- this hook: the bar then stopped fitting menus).
 local function installTopHook()
     installMenuFit()
-    if UIManager._audiobook_top_hook then return end
-    local orig_show = UIManager.show
+    if UIManager.show == rawget(UIManager, "_audiobook_show_fn")
+            and UIManager.close == rawget(UIManager, "_audiobook_close_fn") then
+        return
+    end
+    if rawget(UIManager, "_audiobook_show_fn") then
+        logger.warn("AudiobookPlayer: UIManager.show was replaced; hooking it again")
+        -- Lists opened while the hook was gone: fit them now.
+        local stack = UIManager._window_stack or {}
+        for i = 1, #stack do
+            local w = stack[i].widget
+            if type(w) == "table" and w ~= rawget(UIManager, "_audiobook_top_bar") then
+                pcall(fitShownList, w)
+            end
+        end
+    end
     UIManager._audiobook_top_hook = true
+    local orig_show = UIManager.show
+    if UIManager.show ~= rawget(UIManager, "_audiobook_show_fn") then
     UIManager.show = function(um, widget, ...)
         local r = orig_show(um, widget, ...)
         local bar = rawget(UIManager, "_audiobook_top_bar")
@@ -3512,8 +3556,11 @@ local function installTopHook()
         end
         return r
     end
+    UIManager._audiobook_show_fn = UIManager.show
+    end
     -- A screen closing may put the bar back in its slot (see _miniBarY).
     local orig_close = UIManager.close
+    if UIManager.close ~= rawget(UIManager, "_audiobook_close_fn") then
     UIManager.close = function(um, widget, ...)
         local r = orig_close(um, widget, ...)
         local bar = rawget(UIManager, "_audiobook_top_bar")
@@ -3522,6 +3569,8 @@ local function installTopHook()
             if not ok then logger.warn("AudiobookPlayer: bar position failed:", err) end
         end
         return r
+    end
+    UIManager._audiobook_close_fn = UIManager.close
     end
 end
 
@@ -3829,6 +3878,18 @@ end
 
 function AudiobookPlayer:paintTo(bb, x, y)
     if not self.visible or self.suppressed then return end
+    -- Cheap check (two compares): if our UIManager hook was dropped, put
+    -- it back after this paint.
+    if rawget(UIManager, "_audiobook_top_bar") == self and not self._rehook_pending
+            and (UIManager.show ~= rawget(UIManager, "_audiobook_show_fn")
+                or UIManager.close ~= rawget(UIManager, "_audiobook_close_fn")) then
+        self._rehook_pending = true
+        UIManager:nextTick(function()
+            self._rehook_pending = nil
+            local ok, err = pcall(installTopHook)
+            if not ok then logger.warn("AudiobookPlayer: re-hook failed:", err) end
+        end)
+    end
     if self._minimized then
         -- Draw only the mini player bar at bottom (optionally above status bar).
         -- UIManager's window.y for this widget is always 0 (set when first shown),
