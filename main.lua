@@ -632,7 +632,7 @@ function Audiobook:showSyncControl()
     SyncUI.showControl(self)
 end
 
---- Tap to sync: tap the word being heard, the offset is set from it.
+--- Tap to sync: a dialog names a word coming up; tap when it is heard.
 -- on_done(new_ms) runs once it is set (for a control that shows the value).
 function Audiobook:startTapToSync(on_done)
     local ok, TapSync = pcall(dofile, PLUGIN_PATH .. "tapsync.lua")
