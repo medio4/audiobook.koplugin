@@ -4675,7 +4675,20 @@ function Audiobook:_pauseOnBackTurn()
     logger.warn("Audiobook: turned back to page", page, "from", cur_page, "; paused")
     local bar = ms.playback_bar
     if bar and bar._showHint then
-        pcall(bar._showHint, bar, _("Paused. Play starts from this page."))
+        -- Say what Play will do: the bar's Play offers choices (when
+        -- wired); otherwise the remembered back-turn setting applies.
+        local choice = self:getSetting("back_turn_play_from", nil)
+        local text
+        if bar.on_return_choice then
+            text = _("Paused. Tap Play to choose where to continue.")
+        elseif choice == "mark" then
+            text = _("Paused. Play goes back to where it left off.")
+        elseif choice == "page" then
+            text = _("Paused. Play starts from this page.")
+        else
+            text = _("Paused.")
+        end
+        pcall(bar._showHint, bar, text)
     end
     return true
 end
