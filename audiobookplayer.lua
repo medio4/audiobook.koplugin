@@ -1401,6 +1401,18 @@ function AudiobookPlayer:_miniTimeDirtyRegion()
     if t and t.dimen and t.dimen.w and t.dimen.w > 0 then
         local d = t.dimen
         local pad = 2
+        -- Large bar: the clock's row across the whole centre box, so a
+        -- longer time is never clipped to the previous text's width.
+        local box = self.large_mini_bar and self._mini_center_box
+            and self._mini_center_box.dimen
+        if box and box.w and box.w > 0 and box.x then
+            return Geom:new{
+                x = math.max(0, box.x),
+                y = math.max(0, d.y - pad),
+                w = box.w,
+                h = d.h + pad * 2,
+            }
+        end
         return Geom:new{
             x = math.max(0, d.x - pad),
             y = math.max(0, d.y - pad),
@@ -2157,9 +2169,12 @@ function AudiobookPlayer:_buildLargeMiniBar()
             self._mini_title,
         }
     else
-        -- Sized for a long clock ("88:88:88 / 88:88:88") so ticking never
-        -- needs a bigger box than this.
-        local probe = fitted("88:88:88 / 88:88:88", { 15, 13, 12, 11 }, false, false)
+        -- Sized for the clock's shape ("88:88 / 88:88", hours when the
+        -- current text has them) so ticking never needs a bigger box.
+        local shape = (self.current_time_str and self.current_time_str ~= ""
+            and self.current_time_str:gsub("%d", "8")) or "88:88 / 88:88"
+        if #shape < #"88:88 / 88:88" then shape = "88:88 / 88:88" end
+        local probe = fitted(shape, { 15, 14, 13, 12 }, false, false)
         local time_face = probe.face
         probe:free()
         self._mini_time = TextWidget:new{
@@ -2181,10 +2196,14 @@ function AudiobookPlayer:_buildLargeMiniBar()
         table.insert(row_items, HorizontalSpan:new{ width = gap })
     end
     for _i, b in ipairs(left_buttons) do add(b) end
-    add(CenterContainer:new{
+    -- Kept so the clock's 1 Hz repaint covers the whole centre width: the
+    -- time widget's own rect shrinks to its last text, which clipped
+    -- "0:16 / 15:34" to "0:16 / 15:3".
+    self._mini_center_box = CenterContainer:new{
         dimen = Geom:new{ w = center_max_width, h = inner_h },
         mini_center,
-    })
+    }
+    add(self._mini_center_box)
     for _i, b in ipairs(right_buttons) do add(b) end
     -- A short divider keeps ✕ apart from the buttons used while listening.
     add(LineWidget:new{
