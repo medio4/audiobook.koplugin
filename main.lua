@@ -1220,6 +1220,19 @@ function Audiobook:addToMainMenu(menu_items)
                         end,
                         help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake and the frontlight turns off until you open it. Paused from the headset, it stays awake up to 30 minutes so you can resume; once playback stops it suspends within about 30 seconds. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
                     },
+                    {
+                        text = _("Pause when the lid is opened"),
+                        enabled_func = function()
+                            return self:getSetting("keep_playing_on_lid_close", false) and true or false
+                        end,
+                        checked_func = function()
+                            return self:getSetting("pause_on_lid_open", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("pause_on_lid_open", false)
+                        end,
+                        help_text = _("With 'Keep playing when lid is closed' on: opening the lid pauses the audio that kept playing while it was shut. Off by default (the audio just keeps going)."),
+                    },
                 },
             },
             -- ── When holding a book ──
@@ -5885,6 +5898,17 @@ function Audiobook:_installSleepCoverOverride()
             plugin._lid_watchdog_blip = false
             UIManager:unschedule(lidWatchdogTick)
             logger.warn("Audiobook: SleepCover opened — no resume needed (suspend was prevented)")
+            -- Setting: opening the lid pauses what kept playing.
+            if plugin:getSetting("pause_on_lid_open", false) then
+                local ms = plugin.media_sync
+                if ms and ms.state == ms.STATE.PLAYING then
+                    logger.warn("Audiobook: lid opened; pausing (setting)")
+                    pcall(ms.pause, ms)
+                elseif plugin.sync_controller and plugin.sync_controller:isPlaying() then
+                    logger.warn("Audiobook: lid opened; pausing read-aloud (setting)")
+                    pcall(plugin.sync_controller.pause, plugin.sync_controller)
+                end
+            end
             return
         end
         -- Normal resume path
