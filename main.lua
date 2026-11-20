@@ -1029,6 +1029,17 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("For books with a built-in audiobook, while it plays: turning to a later page than the one being read moves the audio to the first line of the new page. Turning back pauses it; Play then starts from the first line of the page you are on. Off by default."),
                     },
                     {
+                        text = _("Hold a word to play from there"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("hold_word_plays_audio", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("hold_word_plays_audio", false)
+                        end,
+                        help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default."),
+                    },
+                    {
                         text = _("Keep the audiobook bar"),
                         enabled_func = function() return (self.ui and self.ui.document) or false end,
                         checked_func = function()
@@ -5219,6 +5230,43 @@ function Audiobook:onDocSettingsLoad(config, document)
     dlog("overlay-margin", "docsettings-copt", "needed", needed, "was", copt)
 end
 
+--- Setting "Hold a word to play from there": a short hold on a single word
+--- (the gesture that would look it up in the dictionary) starts the
+--- audiobook from that sentence instead. Long holds and hold-drag
+--- selections go to KOReader as usual. Wraps this reader's
+--- ReaderHighlight:onHoldRelease, whose gesture handler calls it as a method.
+function Audiobook:_installHoldToPlay()
+    local hl = self.ui and self.ui.highlight
+    if not hl or hl._audiobook_hold_to_play then return end
+    if type(hl.onHoldRelease) ~= "function" then return end
+    hl._audiobook_hold_to_play = true
+    local orig = hl.onHoldRelease
+    local plugin = self
+    hl.onHoldRelease = function(h, ...)
+        local ok, handled = pcall(plugin._holdPlaysFromWord, plugin, h)
+        if not ok then logger.warn("Audiobook: hold-to-play failed:", handled) end
+        if ok and handled then return true end
+        return orig(h, ...)
+    end
+end
+
+--- @treturn bool true when the hold started playback
+function Audiobook:_holdPlaysFromWord(h)
+    if not self:getSetting("hold_word_plays_audio", false) then return false end
+    if h.clear_id or h.select_mode or h.long_hold_reached then return false end
+    if not (h.is_word_selection and h.selected_text and h.selected_text.text) then
+        return false
+    end
+    if h.selected_text.text:find("%s") then return false end
+    if not self:_hasMediaOverlays() then return false end
+    local sel = h.selected_text
+    logger.warn("Audiobook: hold on a word plays from there:", sel.text)
+    if h._resetHoldTimer then pcall(h._resetHoldTimer, h, true) end
+    pcall(h.clear, h)
+    self:startAlignedAudioFromSelection(sel)
+    return true
+end
+
 --- Pin the overlay mini-bar and restore the last sentence (highlighted,
 --- audio armed, not playing) so Play continues from there.
 function Audiobook:onReaderReady()
@@ -5226,6 +5274,7 @@ function Audiobook:onReaderReady()
     -- the page; another book keeps the bubble on top.
     pcall(self._reattachFloating, self)
     if not self._init_ok or not self.media_sync then return end
+    pcall(self._installHoldToPlay, self)
     if not self:getSetting("keep_media_overlay_bar", false) then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
     local ds = self.ui.doc_settings
