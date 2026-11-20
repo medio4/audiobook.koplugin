@@ -731,39 +731,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("page_turn_skips_audio", false)
                         end,
-                        help_text = _("For books with a built-in audiobook, while it plays: turning to a later page than the one being read moves the audio to the first line of the new page. Turning back pauses it; Play then starts from the first line of the page you are on, or where the audiobook left off (see the next setting). Off by default."),
-                    },
-                    {
-                        text_func = function()
-                            local v = self:getSetting("back_turn_play_from", nil)
-                            local label = (v == "page" and _("this page"))
-                                or (v == "mark" and _("where it left off"))
-                                or _("ask")
-                            return T(_("After turning back, Play starts from: %1"), label)
-                        end,
-                        enabled_func = function()
-                            return self:getSetting("page_turn_skips_audio", false) and true or false
-                        end,
-                        sub_item_table = {
-                            {
-                                text = _("This page"),
-                                checked_func = function() return self:getSetting("back_turn_play_from", nil) == "page" end,
-                                callback = function() self:setSetting("back_turn_play_from", "page") end,
-                            },
-                            {
-                                text = _("Where the audiobook left off"),
-                                checked_func = function() return self:getSetting("back_turn_play_from", nil) == "mark" end,
-                                callback = function() self:setSetting("back_turn_play_from", "mark") end,
-                            },
-                            {
-                                text = _("Ask next time"),
-                                checked_func = function()
-                                    local v = self:getSetting("back_turn_play_from", nil)
-                                    return v ~= "page" and v ~= "mark"
-                                end,
-                                callback = function() self:setSetting("back_turn_play_from", "ask") end,
-                            },
-                        },
+                        help_text = _("For books with a built-in audiobook, while it plays: turning to a later page than the one being read moves the audio to the first line of the new page. Turning back pauses it; the bar's Play button then offers: play from this page, resume where it left off, or go back without playing. Off by default."),
                     },
                     {
                         text = _("Hold a word to play from there"),
@@ -4772,20 +4740,9 @@ function Audiobook:_pauseOnBackTurn()
     logger.warn("Audiobook: turned back to page", page, "from", cur_page, "; paused")
     local bar = ms.playback_bar
     if bar and bar._showHint then
-        -- Say what Play will do: the bar's Play offers choices (when
-        -- wired); otherwise the remembered back-turn setting applies.
-        local choice = self:getSetting("back_turn_play_from", nil)
-        local text
-        if bar.on_return_choice then
-            text = _("Paused. Tap Play to choose where to continue.")
-        elseif choice == "mark" then
-            text = _("Paused. Play goes back to where it left off.")
-        elseif choice == "page" then
-            text = _("Paused. Play starts from this page.")
-        else
-            text = _("Paused.")
-        end
-        pcall(bar._showHint, bar, text)
+        pcall(bar._showHint, bar, bar.on_return_choice
+            and _("Paused. Tap Play to choose where to continue.")
+            or _("Paused."))
     end
     return true
 end
@@ -4820,18 +4777,16 @@ function Audiobook:_showReturnChoices()
             {{ text = _("Pause"), callback = act(function() ms:pause() end) }},
         }
     else
+        -- All three, every time (Jacob: no setting, no question).
         rows = {
-            {{ text = _("Play, and go back to the read-along line"), callback = act(function()
-                self._play_from_page = nil
+            {{ text = _("Play from this page"), callback = act(function()
+                self:_resumeFromPage("page")
+            end) }},
+            {{ text = _("Resume where it left off"), callback = act(function()
                 self:_resumeFromPage("mark")
             end) }},
-            {{ text = _("Go back to the read-along line, don't play"), callback = act(go_back) }},
+            {{ text = _("Go back without playing"), callback = act(go_back) }},
         }
-        if self:getSetting("page_turn_skips_audio", false) then
-            table.insert(rows, 2, {{ text = _("Play from this page"), callback = act(function()
-                self:_resumeFromPage("page")
-            end) }})
-        end
     end
     dlg = ButtonDialog:new{ buttons = rows }
     UIManager:show(dlg)
@@ -4848,32 +4803,9 @@ function Audiobook:_resumeFromPage(mode)
     local ms = self.media_sync
     if not (ms and ms.timing_data and ms.state == ms.STATE.PAUSED) then return false end
 
-    -- Setting: start from this page, or where playback left off. Asked
-    -- the first time, then remembered (changeable in the menu). `mode`
-    -- (from the Play button's choices) overrides it.
-    local choice = mode or self:getSetting("back_turn_play_from", nil)
-    if choice ~= "page" and choice ~= "mark" then
-        local ButtonDialog = require("ui/widget/buttondialog")
-        local dlg
-        local function pick(v)
-            UIManager:close(dlg)
-            self:setSetting("back_turn_play_from", v)
-            logger.warn("Audiobook: after a back turn, Play starts from", v)
-            self._play_from_page = true
-            if self.media_sync then self.media_sync:resume() end
-        end
-        dlg = ButtonDialog:new{
-            title = _("You turned back a page. Should Play start from this page, or where the audiobook left off?\n\nYou can change this later in Read-Along settings."),
-            buttons = {{
-                { text = _("This page"), callback = function() pick("page") end },
-                { text = _("Where it left off"), callback = function() pick("mark") end },
-            }},
-        }
-        UIManager:show(dlg)
-        -- Dismissed without a choice: ask again on the next Play.
-        self._play_from_page = true
-        return true
-    end
+    -- `mode` comes from the bar's Play choices. Without one (the headset's
+    -- play button, nothing to choose on), resume where it left off.
+    local choice = mode or "mark"
     if choice == "mark" then
         -- Where it left off: resume at the pause mark and bring the view
         -- back to the line being read.
