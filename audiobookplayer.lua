@@ -1754,15 +1754,21 @@ function AudiobookPlayer:_buildLargeMiniBar()
         math.floor((self.width * 0.86 - gap * n_gaps) / (n_buttons + play_ratio)))
     local play_w = math.floor(mini_btn_size * play_ratio)
 
+    -- Off the read-along page the ways back take the line buttons' place
+    -- and the side buttons shrink to leave the title room.
+    local choice_mode = line_skip and self._return_hint_active and self.on_return_choice_kind
+        and true or false
+    local side_size = choice_mode and math.floor(mini_btn_size * 0.72) or mini_btn_size
+
     local function miniButton(icon, text, font_size, callback)
         if icon then
-            return self:_iconButton(icon, text, mini_btn_size, callback,
+            return self:_iconButton(icon, text, side_size, callback,
                 { icon_ratio = 0.62, font_size = font_size })
         end
         return Button:new{
             text = text,
-            width = mini_btn_size,
-            height = mini_btn_size,
+            width = side_size,
+            height = side_size,
             text_font_size = font_size,
             text_font_bold = true,
             callback = callback,
@@ -1825,36 +1831,52 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- Off the read-along page: the line buttons give way to the ways back
     -- (paused: play here / resume / go back; playing: pause / go back),
     -- and return once the view is back in sync (setReturnHint rebuilds).
-    local choice_extra_w = 0
     self._mini_choice_buttons = nil
-    if line_skip and self._return_hint_active and self.on_return_choice_kind then
+    if choice_mode then
+        -- One outlined box, split into segments (like the play button grown
+        -- sideways): paused, play here / resume / back; playing, pause / back.
+        local seg_w = math.floor(play_w * 0.86)
         local function choice(text, kind)
             return Button:new{
                 text = text,
-                width = play_w,
+                width = seg_w,
                 height = play_h,
                 text_font_size = 15,
                 text_font_bold = true,
-                bordersize = Size.border.thick,
-                radius = Screen:scaleBySize(10),
+                bordersize = 0,
                 callback = function() self.on_return_choice_kind(kind) end,
                 show_parent = self,
             }
         end
         if self.is_playing then
-            self._mini_choice_buttons = { choice(_("↩ Back"), "back") }
-            left_buttons = { self._mini_play_pause, self._mini_choice_buttons[1] }
-            choice_extra_w = play_w - 2 * mini_btn_size
+            self._mini_choice_buttons = {
+                choice("⏸ " .. _("Pause"), "pause"),
+                choice("↩ " .. _("Back"), "back"),
+            }
         else
             self._mini_choice_buttons = {
-                choice(_("▶ Here"), "page"),
-                choice(_("▶ Resume"), "mark"),
-                choice(_("↩ Back"), "back"),
+                choice("▶ " .. _("Here"), "page"),
+                choice("▶ " .. _("Resume"), "mark"),
+                choice("↩ " .. _("Back"), "back"),
             }
-            left_buttons = { self._mini_choice_buttons[1], self._mini_choice_buttons[2],
-                self._mini_choice_buttons[3] }
-            choice_extra_w = 2 * play_w - 2 * mini_btn_size
         end
+        local seg_items = { align = "center" }
+        for i, b in ipairs(self._mini_choice_buttons) do
+            if i > 1 then
+                table.insert(seg_items, LineWidget:new{
+                    dimen = Geom:new{ w = Size.line.medium, h = math.floor(play_h * 0.7) },
+                    background = Blitbuffer.COLOR_GRAY,
+                })
+            end
+            table.insert(seg_items, b)
+        end
+        left_buttons = { FrameContainer:new{
+            bordersize = Size.border.thick,
+            radius = Screen:scaleBySize(10),
+            padding = 0,
+            margin = 0,
+            HorizontalGroup:new(seg_items),
+        } }
     elseif line_skip then
         left_buttons = { self._mini_line_back, self._mini_play_pause, self._mini_line_forward }
     else
@@ -1874,24 +1896,52 @@ function AudiobookPlayer:_buildLargeMiniBar()
         table.insert(right_buttons, self._mini_refocus)
     end
 
-    -- Whatever width the buttons leave goes to the centered title stack.
-    local center_max_width = self.width - play_w
-        - mini_btn_size * (n_buttons) - gap * n_gaps - Size.line.medium
-        - choice_extra_w
-    center_max_width = math.max(mini_btn_size, center_max_width)
+    -- Whatever width the buttons actually take leaves the rest to the
+    -- centred title stack (measured, so shrunk buttons give room back).
+    local used = gap -- leading gap
+    local function width_of(w) return w and w:getSize().w or 0 end
+    for _i, b in ipairs(left_buttons) do used = used + width_of(b) + gap end
+    for _i, b in ipairs(right_buttons) do used = used + width_of(b) + gap end
+    used = used + Size.line.medium + gap + width_of(self._mini_close) + gap
+    used = used + gap -- around the centre stack
+    local center_max_width = math.max(mini_btn_size, self.width - used)
 
-    -- Create the centered title stack now that side buttons have reserved
-    -- their full width, so the text cannot overlap the volume/sync buttons.
-    -- TTS carries no time on the bar: read-along has no meaningful clock
-    -- (there is no audio timeline, only sentences), so the line is dropped.
-    self._mini_title = TextWidget:new{
-        text = (self.chapter_title and self.chapter_title ~= "" and self.chapter_title)
-            or self.output_name or self.title or _("Audiobook"),
-        face = Font:getFace("cfont", 17),
-        bold = true,
-        max_width = center_max_width,
-        truncate_left = false,
-    }
+    -- Title and time always fit: the largest font that fits on one line,
+    -- else the title wraps onto two lines (ellipsis only past that).
+    local function fitted(text, sizes, bold, two_lines)
+        for _i, size in ipairs(sizes) do
+            local w = TextWidget:new{
+                text = text, face = Font:getFace("cfont", size), bold = bold,
+            }
+            if w:getSize().w <= center_max_width then return w end
+            w:free()
+        end
+        local small = sizes[#sizes]
+        if two_lines then
+            local face = Font:getFace("cfont", small)
+            local box = TextBoxWidget:new{
+                text = text, face = face, bold = bold, width = center_max_width,
+                alignment = "center",
+            }
+            local lh = box.line_height_px
+            if lh and box:getSize().h > lh * 2 then
+                box:free()
+                box = TextBoxWidget:new{
+                    text = text, face = face, bold = bold, width = center_max_width,
+                    alignment = "center", height = lh * 2,
+                    height_overflow_show_ellipsis = true,
+                }
+            end
+            return box
+        end
+        return TextWidget:new{
+            text = text, face = Font:getFace("cfont", small), bold = bold,
+            max_width = center_max_width,
+        }
+    end
+    local title_text = self:_miniTitleText()
+    self._mini_title_built_text = title_text
+    self._mini_title = fitted(title_text, { 17, 15, 13 }, true, true)
     local mini_center
     if self.tts_mode then
         self._mini_time = nil
@@ -1900,9 +1950,14 @@ function AudiobookPlayer:_buildLargeMiniBar()
             self._mini_title,
         }
     else
+        -- Sized for a long clock ("88:88:88 / 88:88:88") so ticking never
+        -- needs a bigger box than this.
+        local probe = fitted("88:88:88 / 88:88:88", { 15, 13, 12, 11 }, false, false)
+        local time_face = probe.face
+        probe:free()
         self._mini_time = TextWidget:new{
             text = self.current_time_str or "",
-            face = Font:getFace("cfont", 15),
+            face = time_face,
             max_width = center_max_width,
         }
         mini_center = VerticalGroup:new{
@@ -2274,28 +2329,41 @@ function AudiobookPlayer:_updateScrubberPreview(x)
     UIManager:setDirty(self, "fast")
 end
 
-function AudiobookPlayer:_updateMiniWidgets()
-    -- Read-aloud: show the live SMIL chapter title. Fall back to output_name
-    -- (track/book) when no chapter is known yet.
-    -- When browsing away from the audio page, the title becomes a clear
-    -- "Return to read-aloud" cue (tapping the bar centers on the sentence).
-    local track
+--- The mini bar's centre line: the live chapter (else track/book) title,
+--- or, while browsing away from the audio page, a cue to get back.
+function AudiobookPlayer:_miniTitleText()
     if self._return_hint_active then
-        track = (self._mini_choice_buttons and _("Off the read-along page"))
+        return (self._mini_choice_buttons and _("Off the read-along page"))
             or (self.on_return_choice and _("Off the read-along page: tap ▶"))
             or _("Return to read-aloud")
-    else
-        track = self.chapter_title
-        if not track or track == "" then
-            track = self.output_name
-        end
-        if not track or track == "" then
-            track = self.title or _("Audiobook")
+    end
+    local track = self.chapter_title
+    if not track or track == "" then
+        track = self.output_name
+    end
+    if not track or track == "" then
+        track = self.title or _("Audiobook")
+    end
+    return track
+end
+
+function AudiobookPlayer:_updateMiniWidgets()
+    local track = self:_miniTitleText()
+    -- Large bar: its title is sized to fit when built, so new text means
+    -- building it again (chapter changes are rare; the clock is not this).
+    if self.large_mini_bar and not self.tts_mode and self._mini_title
+            and self._mini_title_built_text ~= track and not self._rebuilding_mini then
+        self._rebuilding_mini = true
+        local ok, err = pcall(self._buildLargeMiniBar, self)
+        self._rebuilding_mini = nil
+        if not ok then logger.warn("AudiobookPlayer: bar rebuild failed:", err) end
+        if self._minimized then
+            UIManager:setDirty(self, function() return "ui", self.dimen end)
         end
     end
     -- TTS owns its center line through the context cycler (see
     -- _scheduleTtsInfo); do not clobber it with the chapter/track name.
-    if self._mini_title and not self.tts_mode then
+    if self._mini_title and not self.tts_mode and self._mini_title_built_text ~= track then
         self._mini_title:setText(track)
     end
     if self._mini_time then

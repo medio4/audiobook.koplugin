@@ -4759,7 +4759,9 @@ function Audiobook:_returnChoice(kind)
     local ms = self.media_sync
     if not ms then return end
     logger.warn("Audiobook: return choice", kind)
-    if kind == "back" then
+    if kind == "pause" then
+        if ms.state == ms.STATE.PLAYING then pcall(ms.pause, ms) end
+    elseif kind == "back" then
         self._play_from_page = nil
         self._readaloud_browsing_away = false
         self:_hideReturnToReadAloudButton()
