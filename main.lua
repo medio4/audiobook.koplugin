@@ -33,6 +33,9 @@ end
 local Device, UIManager, InfoMessage, T, Time
 local BtUI, BtMediaControl, BugReport, BenchmarkRunner, MenuBuilder, Utils, Updater
 local SessionRecorder
+-- Seconds to start before a line when playing from it (headphones miss the
+-- first moment of a new stream).
+local LINE_START_LEAD_S = 0.3
 local PLUGIN_PATH
 
 -- Floating player (setting floating_player): a read-along that keeps
@@ -2731,6 +2734,7 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
         -- Start from the reader's current position, unless a specific entry was
         -- requested (e.g., "Play aligned audiobook from here").
         local start_file, start_time
+        local line_start_entry -- set when starting just before a line
         if not (chosen_entry and chosen_entry.audio_path) and not opts.prepare_only then
             -- The first sentence on the page the reader is looking at now,
             -- rather than the start of its chapter.
@@ -2744,6 +2748,15 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
         if chosen_entry and chosen_entry.audio_path then
             start_file = chosen_entry.audio_path
             start_time = chosen_entry.start_time
+            -- Starting at a line (a timing entry; a resume mark has no end):
+            -- hear its first word. The narration says it at start + the
+            -- sync offset, and Bluetooth headphones swallow the first moment
+            -- of a new stream, so begin a little before.
+            if start_time and chosen_entry.end_time then
+                local off = (tonumber(self.getSyncOffsetMs and self:getSyncOffsetMs()) or 0) / 1000
+                start_time = math.max(0, start_time + off - LINE_START_LEAD_S)
+                line_start_entry = chosen_entry
+            end
             -- Make "Continue listening" pick up a "Play from here" start so
             -- the two entry points stay in sync.
             local chapter_title
@@ -2819,6 +2832,19 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
         if started and start_position then
             logger.warn("Audiobook: SMIL", opts.prepare_only and "prepared" or "playback started",
                 "at", start_position, "for", first:match("([^/]+)$"))
+        end
+        -- Started just before a line: keep that line highlighted until the
+        -- narration reaches it (not the end of the line before).
+        self.media_sync._start_line_hold = nil
+        if started and line_start_entry and line_start_entry.fragment_id then
+            local td = self.media_sync.timing_data or {}
+            for i, e in ipairs(td) do
+                if e.fragment_id == line_start_entry.fragment_id
+                        and e.start_time == line_start_entry.start_time then
+                    self.media_sync._start_line_hold = { idx = i, until_pos = e.start_time }
+                    break
+                end
+            end
         end
         -- Jump the book view straight to the chosen SMIL entry (by fragment),
         -- not a page-by-page crawl and not a fragile start_time lookup.

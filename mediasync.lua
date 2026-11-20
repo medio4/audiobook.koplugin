@@ -2289,6 +2289,16 @@ function MediaSync:_updateHighlightAtTime(pos)
     -- Find current sentence by binary search on start_time
     local sent_idx = self:_findSentenceAtTime(pos)
     if not sent_idx then return end
+    -- Playing from a line starts a moment before it (see main.lua
+    -- LINE_START_LEAD_S): keep that line highlighted, not the one before.
+    local hold = self._start_line_hold
+    if hold then
+        if pos >= hold.until_pos or sent_idx > hold.idx then
+            self._start_line_hold = nil
+        elseif sent_idx < hold.idx then
+            sent_idx = hold.idx
+        end
+    end
 
     local sentence = self.timing_data[sent_idx]
     if not sentence then return end
