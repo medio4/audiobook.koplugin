@@ -5435,7 +5435,25 @@ function Audiobook:_ensureAudiobookChromeMargins()
     return self:_applyAudiobookChromeMarginsLive()
 end
 
-function Audiobook:_applyAudiobookChromeMarginsLive()
+--- Home screen "Play audiobook" on a book that is not open yet: reserve
+--- the bar's room before the book is laid out for the first time, so it
+--- is laid out once instead of again when the bar arrives.
+function Audiobook:onPreRenderDocument()
+    local pending = Audiobook._pending_aligned_start
+    if not (pending and pending.action == "start") then return end
+    local doc = self.ui and self.ui.document
+    local path = doc and (doc.file_path or doc.file)
+    if not path or path ~= pending.path or not self.ui.rolling then return end
+    -- Locked margins are already in the book's settings (onDocSettingsLoad).
+    if self:_shouldLockKoreaderMargins() then return end
+    -- The bar does not exist yet: use the height it will be built with.
+    local bar_h = Device.screen:scaleBySize(
+        self:getSetting("large_mini_bar", false) and 76 or 44)
+    local ok, err = pcall(self._applyAudiobookChromeMarginsLive, self, bar_h, true)
+    if not ok then logger.warn("Audiobook: pre-layout bar room failed:", err) end
+end
+
+function Audiobook:_applyAudiobookChromeMarginsLive(bar_h_override, before_render)
     local ui = self.ui
     local tp = ui and ui.typeset
     if not (tp and tp.unscaled_margins and ui.document and ui.document.setPageMargins) then
@@ -5444,7 +5462,7 @@ function Audiobook:_applyAudiobookChromeMarginsLive()
     local Event = require("ui/event")
     local screen = Device.screen
     local m = tp.unscaled_margins
-    local bar_h = self:_audiobookMiniBarPixelHeight()
+    local bar_h = bar_h_override or self:_audiobookMiniBarPixelHeight()
     local ms = self.media_sync
     local bottom = screen:scaleBySize(m[4]) + bar_h
     local reclaim = ms and ms._footerReclaimsHeight and ms:_footerReclaimsHeight()
@@ -5461,8 +5479,10 @@ function Audiobook:_applyAudiobookChromeMarginsLive()
         screen:scaleBySize(m[3]), bottom)
     if ok then
         self._audiobook_chrome_margins_applied = true
-        ui:handleEvent(Event:new("UpdatePos"))
-        dlog("overlay-margin", "live-set", "bottom_px", bottom, "bar_h", bar_h)
+        -- Before the first layout there is no position to update yet.
+        if not before_render then ui:handleEvent(Event:new("UpdatePos")) end
+        dlog("overlay-margin", before_render and "pre-render" or "live-set",
+            "bottom_px", bottom, "bar_h", bar_h)
         return true
     end
     return false
