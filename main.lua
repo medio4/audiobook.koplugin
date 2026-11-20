@@ -2144,7 +2144,12 @@ function Audiobook:_checkPendingAlignedStart()
     Audiobook._pending_aligned_start = nil
     UIManager:scheduleIn(0.5, function()
         if pending.action == "start" then
-            self:_startMediaPlaybackForDocument(doc_path)
+            -- Home screen "Play audiobook": resume without the question.
+            if self:_hasMediaOverlays() then
+                self:_startSmilPlayback(doc_path, nil, true, { resume_silently = true })
+            else
+                self:_startMediaPlaybackForDocument(doc_path)
+            end
         else
             local text
             if self:_documentIsStrippedReadalong(doc_path) then
@@ -2560,7 +2565,8 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
         -- in the bar, and come back here when it is done.
         if self:_loadOverlayInBackground(doc_path, parser, opts,
                 function(moved, prepare_only)
-                    local again = { prepare_only = prepare_only, _bar_loading = true }
+                    local again = { prepare_only = prepare_only, _bar_loading = true,
+                        resume_silently = opts.resume_silently }
                     if moved then
                         -- The reader turned pages while it loaded: start
                         -- (or arm) at the page they are on now, no prompt,
@@ -2880,8 +2886,20 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
         return
     end
 
+    -- Started from the home screen's "Play audiobook": that already says
+    -- "carry on listening", so resume at the saved mark without asking
+    -- (no saved mark: from the page the book opens on).
+    if allow_resume and opts.resume_silently then
+        local saved_pos = self:_getSavedAlignedPosition(doc_path)
+        local entry
+        if saved_pos and saved_pos > 10 then
+            entry = self:_resumeEntryFromSave(doc_path, timing_data, by_file)
+        end
+        logger.warn("Audiobook: home-screen play resumes",
+            entry and ("at " .. tostring(entry.start_time)) or "from this page")
+        do_start(entry or start_entry)
     -- When invoked from the main menu, offer to resume from the last saved position.
-    if allow_resume then
+    elseif allow_resume then
         self:_promptResumeAlignedPlayback(doc_path, timing_data, start_entry, function(chosen_entry)
             -- Answered later: show "Loading audiobook…" again for the start.
             self:_withBarLoading(doc_path, {}, function()
