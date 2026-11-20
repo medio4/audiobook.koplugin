@@ -580,6 +580,16 @@ function Audiobook:onReaderFooterVisibilityChange()
     end)
 end
 
+--- The sync UI module (words, scale, control), loaded once.
+function Audiobook:_syncUI()
+    if not self._syncui_mod then
+        local ok, mod = pcall(dofile, PLUGIN_PATH .. "syncui.lua")
+        if not ok then return false, mod end
+        self._syncui_mod = mod
+    end
+    return true, self._syncui_mod
+end
+
 function Audiobook:onAudiobookShowPlayer()
     local bar = self.media_sync and self.media_sync.playback_bar
     if bar and bar.openFull then pcall(bar.openFull, bar) end
@@ -867,30 +877,27 @@ function Audiobook:addToMainMenu(menu_items)
                     },
                     {
                         text_func = function()
+                            local ok, SyncUI = self:_syncUI()
+                            if ok and SyncUI then
+                                return T(_("Highlight timing: %1"), SyncUI.short(SyncUI.get(self)))
+                            end
                             local off = self:getSetting("smil_sync_offset_ms", 0)
-                            return T(_("Overlay sync offset: %1 s"), string.format("%+.1f", off / 1000))
+                            return T(_("Highlight timing: %1 s"), string.format("%+.1f", off / 1000))
                         end,
                         keep_menu_open = true,
                         callback = function(touchmenu_instance)
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local cur = self:getSetting("smil_sync_offset_ms", 0)
-                            UIManager:show(SpinWidget:new{
-                                title_text = _("Overlay sync offset"),
-                                info_text = _("Positive values delay the highlight (use when the highlight runs ahead of the narration); negative values advance it."),
-                                value = cur / 1000,
-                                value_min = -60,
-                                value_max = 60,
-                                value_step = 0.5,
-                                value_hold_step = 5,
-                                precision = "%.1f",
-                                ok_text = _("Set"),
-                                callback = function(spin)
-                                    self:setSetting("smil_sync_offset_ms", math.floor(spin.value * 1000))
+                            local ok, SyncUI = self:_syncUI()
+                            if not (ok and SyncUI) then
+                                logger.warn("Audiobook: sync control failed to load:", SyncUI)
+                                return
+                            end
+                            SyncUI.showControl(self, {
+                                on_change = function()
                                     if touchmenu_instance then touchmenu_instance:updateItems() end
                                 end,
                             })
                         end,
-                        help_text = _("Shifts EPUB Media Overlay sentence highlighting relative to the audio. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio."),
+                        help_text = _("Moves the read-along highlight later or earlier than the narration. Opens a control that shows the current shift in words and on a scale, with Earlier and Later buttons. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio. In the full-screen player, tap the sync label to open the same control."),
                     },
                 },
             },
