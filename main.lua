@@ -4581,6 +4581,8 @@ function Audiobook:_skipAudioToTurnedPage()
     if not page then return false end
     local cur = ms:_skipBase()
     local cur_page = ms:_entryPage(cur)
+    logger.warn("Audiobook: page turn: now on page", page, "; narrated line", cur,
+        "is on page", cur_page)
     -- Forward turns only; a page we cannot place is left alone.
     if not cur_page or page <= cur_page then return false end
 
@@ -4622,6 +4624,8 @@ function Audiobook:_skipAudioToTurnedPage()
     local entry = self:_entryOnCurrentPage(self._smil_parser, self._smil_timing_data)
     if not (entry and entry.audio_path)
             or entry.audio_path == ms.media_engine.current_path then
+        logger.warn("Audiobook: page turn: no line found for page", page,
+            "(in this part:", found, "; book-wide:", entry and entry.fragment_id, ")")
         return false
     end
     ms:_cancelSelection()
@@ -4764,6 +4768,11 @@ function Audiobook:_handlePageTurnFollow()
         self._readaloud_browsing_away = false
         self:_hideReturnToReadAloudButton()
         return
+    end
+    if self:getSetting("page_turn_skips_audio", false) then
+        logger.warn("Audiobook: page turn seen: state", self.media_sync.state,
+            "auto-follow count", self._media_sync_page_follow_count or 0,
+            "busy", self._in_handle_page_turn_follow and true or false)
     end
     -- Ignore page events caused by MediaSync's own auto-follow.
     if (self._media_sync_page_follow_count or 0) > 0 then return end
