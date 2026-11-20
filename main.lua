@@ -618,19 +618,36 @@ function Audiobook:_arrangeBarItems(key, title)
     for _i, id in ipairs(order) do
         table.insert(item_table, { text = labels[id] or id, id = id })
     end
-    local SortWidget = require("ui/widget/sortwidget")
     local sw
+    local function save(list)
+        local ids = {}
+        for _i, it in ipairs(list) do table.insert(ids, it.id) end
+        self:setSetting(key, ids)
+        logger.warn("Audiobook: saved", key, table.concat(ids, ","))
+        local bar = self.media_sync and self.media_sync.playback_bar
+        if bar and bar.refreshLayout then pcall(bar.refreshLayout, bar) end
+    end
+    -- ZenOS: its own arrange list (drag and drop, its look); it reorders
+    -- item_table in place, like the stock one.
+    local ok_z, ZenArrange = pcall(require, "common/ui/zen_arrange_list")
+    if ok_z and type(ZenArrange) == "table" and type(ZenArrange.show) == "function" then
+        local ok_show, err = pcall(ZenArrange.show, {
+            title = title,
+            item_table = item_table,
+            callback = function()
+                local list = (sw and sw.item_table) or item_table
+                save(list)
+            end,
+        })
+        if ok_show then return end
+        logger.warn("Audiobook: ZenOS arrange list failed, using KOReader's:", err)
+    end
+    -- Stock KOReader (and SimpleUI): tap an item, move it with the arrows.
+    local SortWidget = require("ui/widget/sortwidget")
     sw = SortWidget:new{
         title = title,
         item_table = item_table,
-        callback = function()
-            local ids = {}
-            for _i, it in ipairs(sw.item_table) do table.insert(ids, it.id) end
-            self:setSetting(key, ids)
-            logger.warn("Audiobook: saved", key, table.concat(ids, ","))
-            local bar = self.media_sync and self.media_sync.playback_bar
-            if bar and bar.refreshLayout then pcall(bar.refreshLayout, bar) end
-        end,
+        callback = function() save(sw.item_table) end,
     }
     UIManager:show(sw)
 end
