@@ -3435,33 +3435,57 @@ local function installMenuFit()
             return orig(m, ...)
         end
     end
-    -- Full-screen pages that size themselves (ZenOS's settings page sets
-    -- its own height to the screen and counts rows from available_height
-    -- after Menu._recalculateDimen): take the part under the bar out of
-    -- available_height, so they put fewer rows on a page.
-    if ok_m and Menu and Menu._recalculateDimen then
-        local orig_recalc = Menu._recalculateDimen
-        Menu._recalculateDimen = function(m, ...)
-            local r = orig_recalc(m, ...)
-            local ok, y = pcall(menuRoomAboveBar)
-            local d = m.dimen
-            local before = m.available_height
-            if ok and y and d and d.h and m.available_height then
-                local bottom = (d.y or 0) + d.h
-                if bottom > y then
-                    m.available_height = math.max(0, m.available_height - (bottom - y))
-                end
-            end
-            -- Diagnostic (once per page kind): why a page did or did not fit.
-            local key = tostring(m.name) .. ":" .. tostring(y)
-            if UIManager._audiobook_fit_logged ~= key then
-                UIManager._audiobook_fit_logged = key
-                logger.warn("AudiobookPlayer: menu fit", m.name, "bar y", y,
-                    "dimen", d and d.y, d and d.h, "available", before, "->", m.available_height,
-                    UIManager._audiobook_fit_why or "")
-            end
-            return r
-        end
+end
+
+--- Fewer rows per page for a full-screen list that runs under the bar.
+--- Called after the list has laid itself out; returns true if it changed.
+local function shrinkListUnderBar(w)
+    local ok, y = pcall(menuRoomAboveBar)
+    local d, item = w.dimen, w.item_dimen
+    if not (ok and y and d and d.h and item and item.h and item.h > 0
+            and w.available_height and w.perpage) then
+        return false
+    end
+    local over = (d.y or 0) + d.h - y
+    if over <= 0 then return false end
+    local perpage = math.max(1, math.floor((w.available_height - over) / item.h))
+    if perpage >= w.perpage then return false end
+    w.perpage = perpage
+    if w.getPageNumber and w.item_table then
+        w.page_num = w:getPageNumber(#w.item_table)
+        w.page = math.min(w.page or 1, w.page_num)
+    end
+    return true
+end
+
+--- Some full-screen lists (ZenOS's settings pages) work out their rows
+--- in their own code, out of reach of the Menu hooks above. When one is
+--- shown, wrap its layout step so every page it lays out (submenus too)
+--- stops above the bar, then lay it out again.
+local function fitShownList(w)
+    if w._ab_fit_wrapped or type(w._recalculateDimen) ~= "function"
+            or not w.item_dimen or not w.updateItems then
+        return
+    end
+    w._ab_fit_wrapped = true
+    local own = w._recalculateDimen
+    w._recalculateDimen = function(self, ...)
+        local r = own(self, ...)
+        pcall(shrinkListUnderBar, self)
+        return r
+    end
+    local before = w.perpage
+    local changed = shrinkListUnderBar(w)
+    -- One line per kind of list, so a page that still runs under the
+    -- bar can be traced from the log.
+    if UIManager._audiobook_fit_logged ~= w.name then
+        UIManager._audiobook_fit_logged = w.name
+        local d = w.dimen
+        logger.warn("AudiobookPlayer: list fit", w.name, "rows", before, "->", w.perpage,
+            "dimen", d and d.y, d and d.h, UIManager._audiobook_fit_why or "")
+    end
+    if changed then
+        w:updateItems()
     end
 end
 
@@ -3476,6 +3500,8 @@ local function installTopHook()
         if bar and widget ~= bar and type(widget) == "table" and not widget.toast then
             local ok, err = pcall(bar._keepOnTop, bar)
             if not ok then logger.warn("AudiobookPlayer: keep on top failed:", err) end
+            ok, err = pcall(fitShownList, widget)
+            if not ok then logger.warn("AudiobookPlayer: list fit failed:", err) end
         end
         return r
     end
