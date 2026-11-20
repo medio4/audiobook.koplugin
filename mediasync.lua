@@ -2333,6 +2333,9 @@ function MediaSync:_updateHighlightAtTime(pos)
                 self.plugin._suppress_media_sync_auto_page_follow = nil
             end
         end
+        if browsing_away and self:_narrationCaughtUp(sent_idx) then
+            browsing_away = false
+        end
         if browsing_away then
             -- Stay on the user's page: do not paint a coincidental phrase.
         elseif self.highlight_manager and (sentence.text or sentence.fragment_id) then
@@ -2469,6 +2472,28 @@ function MediaSync:_updateHighlightAtTime(pos)
     if self.overlay_mode then
         self:_followSentenceAcrossPages(sentence, pos)
     end
+end
+
+--- The reader turned ahead of the narration and stayed there: once the
+--- narrated line reaches the page on screen, sync resumes (highlight and
+--- page follow), as if they had tapped Return. Checked once per line.
+-- @treturn bool true when it cleared the browsing-away state
+function MediaSync:_narrationCaughtUp(sent_idx)
+    if not (self.plugin and sent_idx) then return false end
+    if sent_idx == self._caught_up_checked_idx then return false end
+    self._caught_up_checked_idx = sent_idx
+    local line_page = self:_entryPage(sent_idx)
+    if not line_page then return false end
+    local ui = self.plugin.ui
+    local ok, page = pcall(function() return ui.document:getCurrentPage() end)
+    if not (ok and tonumber(page) == line_page) then return false end
+    self.plugin._readaloud_browsing_away = false
+    if self.plugin._hideReturnToReadAloudButton then
+        pcall(self.plugin._hideReturnToReadAloudButton, self.plugin)
+    end
+    logger.warn("MediaSync: narration reached the page on screen (", line_page,
+        "); following again")
+    return true
 end
 
 function MediaSync:_ensureSentenceHighlighted(sentence, sent_idx)
