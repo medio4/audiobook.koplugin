@@ -335,12 +335,28 @@ function AudiobookPlayer:setupUI()
     if self.show_loop then visible_buttons = visible_buttons + 1 end
     if self.show_fix_audio then visible_buttons = visible_buttons + 1 end
     if self.tts_mode then visible_buttons = visible_buttons + 1 end
-    self.title_widget = TextWidget:new{
+    -- The title wraps onto a second line (ellipsis after that) instead of
+    -- being cut from the left on one line.
+    local title_w = self.width - top_size * visible_buttons - spacing * visible_buttons
+    local title_face = Font:getFace("cfont", 18)
+    self.title_widget = TextBoxWidget:new{
         text = self.title or _("Audiobook"),
-        face = Font:getFace("cfont", 18),
-        max_width = self.width - top_size * visible_buttons - spacing * visible_buttons,
-        truncate_left = true,
+        face = title_face,
+        width = title_w,
+        alignment = "center",
     }
+    local lh = self.title_widget.line_height_px
+    if lh and self.title_widget:getSize().h > lh * 2 then
+        self.title_widget:free()
+        self.title_widget = TextBoxWidget:new{
+            text = self.title or _("Audiobook"),
+            face = title_face,
+            width = title_w,
+            alignment = "center",
+            height = lh * 2,
+            height_overflow_show_ellipsis = true,
+        }
+    end
 
     -- Build top row left-to-right explicitly
     local top_row_items = {
@@ -363,7 +379,8 @@ function AudiobookPlayer:setupUI()
         table.insert(top_row_items, HorizontalSpan:new{ width = math.floor(spacing / 2) })
     end
     table.insert(top_row_items, CenterContainer:new{
-        dimen = Geom:new{ w = self.title_widget:getSize().w, h = top_size },
+        dimen = Geom:new{ w = self.title_widget:getSize().w,
+            h = math.max(top_size, self.title_widget:getSize().h) },
         self.title_widget,
     })
     table.insert(top_row_items, HorizontalSpan:new{ width = spacing })
