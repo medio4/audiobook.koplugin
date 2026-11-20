@@ -540,6 +540,54 @@ function Audiobook:onDispatcherRegisterActions()
         title = _("Show / hide the floating Read-Along player"),
         general = true,
     })
+    -- For KOReader's Gesture manager: bind any gesture. The Dispatcher hands
+    -- a "none" action the gesture itself, so this plays from the line under
+    -- the finger (or the first line of the page when it has no position).
+    Dispatcher:registerAction("audiobook_play_from_here", {
+        category = "none",
+        event = "AudiobookPlayFromHere",
+        title = _("Play audiobook from here"),
+        reader = true,
+    })
+end
+
+--- Gesture manager action "Play audiobook from here".
+function Audiobook:onAudiobookPlayFromHere(ges)
+    if not self._init_ok or not self.media_sync then return true end
+    local doc = self.ui and self.ui.document
+    if not (doc and self.ui.rolling) then return true end
+    local doc_path = self:_openDocPath()
+    if not self:_hasMediaOverlays() then
+        UIManager:show(InfoMessage:new{
+            text = _("This book has no built-in audiobook."),
+            timeout = 3,
+        })
+        return true
+    end
+    local pos = type(ges) == "table" and ges.pos or nil
+    local sel
+    if pos and self.ui.view and self.ui.view.screenToPageTransform then
+        local ok, page_pos = pcall(self.ui.view.screenToPageTransform, self.ui.view, pos)
+        if ok and page_pos then
+            local ok_w, word = pcall(doc.getWordFromPosition, doc, page_pos)
+            if ok_w and word and word.word and word.word ~= "" then
+                sel = {
+                    text = word.word,
+                    pos0 = word.pos0,
+                    pos1 = word.pos1,
+                }
+            end
+        end
+    end
+    if sel then
+        logger.warn("Audiobook: gesture plays from word:", sel.text)
+        self:startAlignedAudioFromSelection(sel)
+    else
+        -- No word under the gesture (a swipe, a margin): this page.
+        logger.warn("Audiobook: gesture plays from this page")
+        self:_startSmilPlayback(doc_path, nil, false)
+    end
+    return true
 end
 
 function Audiobook:_showInitError()
@@ -726,7 +774,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("hold_word_plays_audio", false)
                         end,
-                        help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default."),
+                        help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default.\n\nTo use another gesture instead, leave this off and bind \"Play audiobook from here\" in Settings > Taps and gestures > Gesture manager."),
                     },
                     {
                         text = _("Auto-advance pages"),
