@@ -4045,6 +4045,21 @@ function AudiobookPlayer:paintTo(bb, x, y)
                     pcall(self._claimTop, self)
                 end
                 local st = UIManager._window_stack or {}
+                -- Diagnostic (first 8 changes): what is on screen.
+                self._list_scan_logs = (self._list_scan_logs or 0) + 1
+                if self._list_scan_logs <= 8 then
+                    local parts = {}
+                    for i = 1, #st do
+                        local w = st[i].widget
+                        parts[#parts + 1] = tostring(type(w) == "table" and (w.name or "?") or w)
+                            .. (type(w) == "table" and w.item_table and "[list]" or "")
+                            .. (w == self and "[bar]" or "")
+                    end
+                    local ok_y, y = pcall(menuRoomAboveBar)
+                    logger.warn("AudiobookPlayer: on screen:", table.concat(parts, ", "),
+                        "registered:", rawget(UIManager, "_audiobook_top_bar") == self,
+                        "room y:", ok_y and y or "?", UIManager._audiobook_fit_why or "")
+                end
                 for i = 1, #st do
                     local w = st[i].widget
                     if type(w) == "table" and w ~= self and w.item_table then
