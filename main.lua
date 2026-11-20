@@ -1988,6 +1988,15 @@ end
 
 -- ── Background overlay load ─────────────────────────────────────────
 
+--- Same EPUB by "size:mtime", allowing the 2 s mtime slack of the Kobo's
+--- FAT storage (see EpubMediaOverlay.sameFingerprint).
+local function sameEpubFp(a, b)
+    if a == b then return true end
+    local sa, ta = tostring(a):match("^(%d+):(%d+)$")
+    local sb, tb = tostring(b):match("^(%d+):(%d+)$")
+    return sa ~= nil and sa == sb and math.abs(tonumber(ta) - tonumber(tb)) <= 2
+end
+
 function Audiobook:_readerXPointer()
     local ok, xp = pcall(function() return self.ui.document:getXPointer() end)
     return ok and xp or nil
@@ -2267,7 +2276,7 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
     end
     local cur_fp = epub_fp(doc_path)
     if self._smil_doc_path == doc_path and cur_fp and self._smil_epub_fp
-        and self._smil_epub_fp ~= cur_fp then
+        and not sameEpubFp(self._smil_epub_fp, cur_fp) then
         logger.warn("Audiobook: EPUB replaced on disk — clearing SMIL memory cache")
         self._smil_parser = nil
         self._smil_timing_data = nil
@@ -3689,7 +3698,7 @@ function Audiobook:_startSmilPlaybackFromSelectionNow(doc_path, selected_text, a
         end
     end
     if parser and timing_data and (self._smil_doc_path ~= doc_path
-        or (cur_fp and self._smil_epub_fp and self._smil_epub_fp ~= cur_fp)) then
+        or (cur_fp and self._smil_epub_fp and not sameEpubFp(self._smil_epub_fp, cur_fp))) then
         -- Cached data belongs to a different book or a replaced EPUB.
         logger.warn("Audiobook: SMIL cache stale for", doc_path, "; reloading")
         parser = nil
