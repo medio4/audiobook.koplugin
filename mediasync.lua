@@ -3255,6 +3255,8 @@ function MediaSync:showPlaybackBar()
             if not ok then logger.warn("MediaSync: return choice failed:", err) end
         end or nil,
         on_refocus = self.overlay_mode and function()
+            -- Back to the book: close menus over it and the full player.
+            pcall(self._closeMenusOverBook, self)
             if self.plugin then
                 self.plugin._readaloud_browsing_away = false
             end
@@ -3359,6 +3361,35 @@ function MediaSync:navigateToSentenceAtTime(seconds)
         return
     end
     self:navigateToSentenceEntry(self.timing_data[sent_idx])
+end
+
+--- Close what sits over the book: the top menu, the settings menu,
+--- full-screen lists (ZenOS settings pages, table of contents...) and the
+--- full-screen player. Toasts and the bar itself stay.
+function MediaSync:_closeMenusOverBook()
+    local ui = self.plugin and self.plugin.ui
+    if ui then
+        pcall(function() ui:handleEvent(Event:new("CloseReaderMenu")) end)
+        pcall(function() ui:handleEvent(Event:new("CloseConfigMenu")) end)
+    end
+    local bar = self.playback_bar
+    local stack = UIManager._window_stack or {}
+    for i = #stack, 1, -1 do
+        local w = stack[i] and stack[i].widget
+        if type(w) == "table" and w ~= bar and w ~= ui and not w.toast
+                and (w.item_table or w.tab_item_table) then
+            if w.closeMenu then
+                pcall(w.closeMenu, w)
+            elseif w.onClose then
+                pcall(w.onClose, w)
+            else
+                UIManager:close(w)
+            end
+        end
+    end
+    if bar and not bar._minimized and bar.onMinimize then
+        pcall(bar.onMinimize, bar)
+    end
 end
 
 function MediaSync:refocusToCurrentSentence()
