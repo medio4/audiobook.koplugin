@@ -5575,7 +5575,7 @@ function Audiobook:_ensureAudiobookChromeMargins()
     end
 
     if already then
-        logger.warn("Audiobook: bar room already there; no new layout")
+        logger.dbg("Audiobook: bar room already there; no new layout")
         self._audiobook_chrome_margins_applied = true
         return false
     end
@@ -5639,7 +5639,7 @@ function Audiobook:_applyAudiobookChromeMarginsLive(bar_h_override, before_rende
         if ui.doc_settings then ui.doc_settings:saveSetting("audiobook_bar_room_px", bottom) end
         -- Before the first layout there is no position to update yet.
         if not before_render then ui:handleEvent(Event:new("UpdatePos")) end
-        logger.warn("Audiobook: bar room", before_render and "before first layout" or "now",
+        logger.dbg("Audiobook: bar room", before_render and "before first layout" or "now",
             "bottom_px", bottom, "bar_h", bar_h, "footer reclaim", reclaim, "above", above)
         return true
     end
@@ -5656,7 +5656,7 @@ function Audiobook:_releaseAudiobookChromeMargins()
         end
     end
     self._audiobook_chrome_margins_applied = false
-    logger.warn("Audiobook: bar room released")
+    logger.dbg("Audiobook: bar room released")
     local ui = self.ui
     if not ui then return end
     if ui.doc_settings then ui.doc_settings:delSetting("audiobook_bar_room_px") end

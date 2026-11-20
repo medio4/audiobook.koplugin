@@ -3611,7 +3611,7 @@ local function fitShownList(w)
         -- Diagnostic for lists this cannot fit (once per kind).
         if w.item_table and UIManager._audiobook_unfit_logged ~= w.name then
             UIManager._audiobook_unfit_logged = w.name
-            logger.warn("AudiobookPlayer: list not fitted:", w.name,
+            logger.dbg("AudiobookPlayer: list not fitted:", w.name,
                 "recalc", type(w._recalculateDimen), "item_dimen", w.item_dimen ~= nil,
                 "updateItems", w.updateItems ~= nil)
         end
@@ -3631,7 +3631,7 @@ local function fitShownList(w)
     if UIManager._audiobook_fit_logged ~= w.name then
         UIManager._audiobook_fit_logged = w.name
         local d = w.dimen
-        logger.warn("AudiobookPlayer: list fit", w.name, "rows", before, "->", w.perpage,
+        logger.dbg("AudiobookPlayer: list fit", w.name, "rows", before, "->", w.perpage,
             "dimen", d and d.y, d and d.h, UIManager._audiobook_fit_why or "")
     end
     if changed then
@@ -3656,7 +3656,7 @@ local function fitSortList(w)
     local before = w.items_per_page
     d.h = y - (d.y or 0)
     w:_populateItems()
-    logger.warn("AudiobookPlayer: list ended at the bar:", w.name or w.title or "?",
+    logger.dbg("AudiobookPlayer: list ended at the bar:", w.name or w.title or "?",
         "rows", before, "->", w.items_per_page)
     -- The strip it gave up shows the book again.
     UIManager:setDirty("all", "ui")
@@ -3701,7 +3701,7 @@ local function installTopHook()
                 and UIManager._audiobook_nobar_logged ~= widget.name then
             -- Diagnostic: a list opened while no bar is registered on top.
             UIManager._audiobook_nobar_logged = widget.name
-            logger.warn("AudiobookPlayer: list shown with no bar on top:", widget.name)
+            logger.dbg("AudiobookPlayer: list shown with no bar on top:", widget.name)
         end
         return r
     end
@@ -4112,22 +4112,6 @@ function AudiobookPlayer:paintTo(bb, x, y)
                 -- Over a full-screen page, drop to the bottom (and back after).
                 pcall(self._syncPosition, self)
                 local st = UIManager._window_stack or {}
-                -- Diagnostic (first 8 changes): what is on screen.
-                self._list_scan_logs = (self._list_scan_logs or 0) + 1
-                if self._list_scan_logs <= 8 then
-                    local parts = {}
-                    for i = 1, #st do
-                        local w = st[i].widget
-                        parts[#parts + 1] = tostring(type(w) == "table" and (w.name or "?") or w)
-                            .. (type(w) == "table" and w.item_table and "[list]" or "")
-                            .. (type(w) == "table" and type(w._populateItems) == "function" and "[sort]" or "")
-                            .. (w == self and "[bar]" or "")
-                    end
-                    local ok_y, y = pcall(menuRoomAboveBar)
-                    logger.warn("AudiobookPlayer: on screen:", table.concat(parts, ", "),
-                        "registered:", rawget(UIManager, "_audiobook_top_bar") == self,
-                        "room y:", ok_y and y or "?", UIManager._audiobook_fit_why or "")
-                end
                 for i = 1, #st do
                     local w = st[i].widget
                     if type(w) == "table" and w ~= self and w.item_table then
