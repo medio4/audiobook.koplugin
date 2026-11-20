@@ -1835,8 +1835,16 @@ function AudiobookPlayer:_buildLargeMiniBar()
     if choice_mode then
         -- One outlined box, split into segments (like the play button grown
         -- sideways): paused, play here / resume / back; playing, pause / back.
-        local seg_w = math.floor(play_w * 0.86)
+        local seg_min = math.floor(play_w * 0.7)
+        local seg_pad = Screen:scaleBySize(10)
         local function choice(text, kind)
+            -- Each segment as wide as its label (on one line), so "Resume"
+            -- does not wrap under its icon.
+            local probe = TextWidget:new{
+                text = text, face = Font:getFace("cfont", 15), bold = true,
+            }
+            local seg_w = math.max(seg_min, probe:getSize().w + 2 * seg_pad)
+            probe:free()
             return Button:new{
                 text = text,
                 width = seg_w,
