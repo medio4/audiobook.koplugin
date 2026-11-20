@@ -1073,16 +1073,28 @@ end
 --- laid out around it); while a menu or list from the book is under it,
 --- wherever the user last dragged it (bar_menu_y_pct), else the slot.
 function AudiobookPlayer:_miniBarY()
-    local pct = self._menu_y_pct
-    if pct and self._minimized and self:_menuOver() then
-        local y = math.floor(pct * self.height + 0.5)
-        return math.max(0, math.min(y, self.height - self._mini_height))
+    if self._minimized and self:_menuOver()
+            and (self._menu_y_pct or self:_menuOver(true)) then
+        return self:_overMenuY()
     end
     return self:_dockedBarY()
 end
 
+--- Where the bar sits over a menu: where the user dragged it, else at the
+--- very bottom (the menu hides the status bar, so it needs no room).
+function AudiobookPlayer:_overMenuY()
+    local pct = self._menu_y_pct
+    if pct then
+        local y = math.floor(pct * self.height + 0.5)
+        return math.max(0, math.min(y, self.height - self._mini_height))
+    end
+    return self.height - self._mini_height - Screen:scaleBySize(4)
+end
+
 --- True when a menu, list or dialog lies between this bar and the book.
-function AudiobookPlayer:_menuOver()
+--- full_screen: only one that covers the whole screen (and so the status
+--- bar), such as a settings page or the table of contents.
+function AudiobookPlayer:_menuOver(full_screen)
     local stack = UIManager._window_stack
     if not (stack and self.ui_widget) then return false end
     local seen_self = false
@@ -1090,7 +1102,10 @@ function AudiobookPlayer:_menuOver()
         local w = stack[j].widget
         if seen_self then
             if w == self.ui_widget then return false end
-            if not w.toast and not w._plugin_chrome then return true end
+            if not w.toast and not w._plugin_chrome
+                    and (not full_screen or w.covers_fullscreen) then
+                return true
+            end
         elseif w == self then
             seen_self = true
         end
@@ -3448,7 +3463,7 @@ local STAY_BELOW = { VirtualKeyboard = true, ScreenSaver = true, ScreenSaverLock
 --- Screen height a menu may use so it ends above the floating bar, or nil
 --- when the bar is not floating over menus (or sits in the upper half,
 --- where the user dragged it out of the way).
-local function menuRoomAboveBar()
+local function menuRoomAboveBar(top_menu)
     local bar = rawget(UIManager, "_audiobook_top_bar")
     if not bar then UIManager._audiobook_fit_why = "no bar claimed"; return nil end
     if not (bar.visible and bar._minimized) or bar.suppressed then
@@ -3462,11 +3477,13 @@ local function menuRoomAboveBar()
         UIManager._audiobook_fit_why = "floating/over-menus off"
         return nil
     end
+    -- Full-screen pages hide the status bar and the bar drops to the
+    -- bottom over them; the top menu leaves it in its slot.
     local y
-    if bar._menu_y_pct then
-        y = math.floor(bar._menu_y_pct * bar.height + 0.5)
-    else
+    if top_menu and not bar._menu_y_pct then
         y = bar:_dockedBarY()
+    else
+        y = bar:_overMenuY()
     end
     if not y or y < bar.height / 2 then
         UIManager._audiobook_fit_why = "bar in upper half y=" .. tostring(y)
@@ -3489,7 +3506,7 @@ local function installMenuFit()
     if ok_t and TouchMenu and TouchMenu.init then
         local orig = TouchMenu.init
         TouchMenu.init = function(tm, ...)
-            local ok, y = pcall(menuRoomAboveBar)
+            local ok, y = pcall(menuRoomAboveBar, true)
             if ok and y and (not tm.height or tm.height > y) then
                 tm.height = y
             end
@@ -3505,7 +3522,7 @@ local function installMenuFit()
         TouchMenu.updateItems = function(tm, ...)
             if tm._ab_base_max then tm.max_per_page = tm._ab_base_max end
             local r = orig_update(tm, ...)
-            local ok, y = pcall(menuRoomAboveBar)
+            local ok, y = pcall(menuRoomAboveBar, true)
             local d = tm.dimen
             if not (ok and y and d and d.h and tm.perpage and tm.perpage > 1) then
                 return r
@@ -4078,6 +4095,8 @@ function AudiobookPlayer:paintTo(bb, x, y)
                     logger.warn("AudiobookPlayer: bar was not registered on top; registering")
                     pcall(self._claimTop, self)
                 end
+                -- Over a full-screen page, drop to the bottom (and back after).
+                pcall(self._syncPosition, self)
                 local st = UIManager._window_stack or {}
                 -- Diagnostic (first 8 changes): what is on screen.
                 self._list_scan_logs = (self._list_scan_logs or 0) + 1
