@@ -178,7 +178,7 @@ function Audiobook:init()
     self:_installSleepCoverOverride()
 
     -- Hold menu on a book: built-in audiobook or text-to-speech (settings
-    -- under "When holding a book", off by default). The library registers
+    -- under "Long-press menu in the library", off by default). The library registers
     -- the buttons; the reader starts TTS when they asked for it.
     local oc_ok, oc_err = pcall(function()
         local OpenChoice = dofile(PLUGIN_PATH .. "openchoice.lua")
@@ -1469,9 +1469,9 @@ function Audiobook:addToMainMenu(menu_items)
                     },
                 },
             },
-            -- ── When holding a book ──
+            -- ── Long-press menu in the library ──
             {
-                text = _("When holding a book"),
+                text = _("Long-press menu in the library"),
                 sub_item_table = {
                     {
                         text = _("Audiobook or text-to-speech buttons"),
