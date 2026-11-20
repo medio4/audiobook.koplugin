@@ -3472,6 +3472,20 @@ local function installMenuFit()
             return r
         end
     end
+    -- Sortable lists (ZenOS shows its settings menus as these) lay out
+    -- their rows and page arrows from their height: build them ending at
+    -- the bar, so the arrows sit just above it rather than under it.
+    local ok_s, SortWidget = pcall(require, "ui/widget/sortwidget")
+    if ok_s and SortWidget and SortWidget.init then
+        local orig_sort_init = SortWidget.init
+        SortWidget.init = function(sw, ...)
+            local ok, y = pcall(menuRoomAboveBar)
+            if ok and y and (not sw.height or sw.height > y) then
+                sw.height = y
+            end
+            return orig_sort_init(sw, ...)
+        end
+    end
     local ok_m, Menu = pcall(require, "ui/widget/menu")
     if ok_m and Menu and Menu.init then
         local orig = Menu.init
