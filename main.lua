@@ -1218,7 +1218,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("keep_playing_on_lid_close", false)
                         end,
-                        help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake, the frontlight turns off and the touch screen is ignored until you open it (headset buttons still work). Paused from the headset, it stays awake up to 30 minutes so you can resume; once playback stops it suspends within about 30 seconds. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
+                        help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake and the frontlight turns off until you open it. Paused from the headset, it stays awake up to 30 minutes so you can resume; once playback stops it suspends within about 30 seconds. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
                     },
                 },
             },
@@ -5738,9 +5738,8 @@ the moment playback stops or pauses, so the device never lies awake
 with nothing audible.  When the setting is off (or audio isn't
 playing), the original KOReader handlers are called normally.
 --]]
---- Lid closed with audio kept playing: frontlight off and the touch screen
---- ignored (the case rubbing it must not turn pages or tap the bar). Keys
---- still work, so headset buttons and the lid itself keep working.
+--- Lid closed with audio kept playing: frontlight off. (Touch stays on:
+--- Jacob preferred not to change input handling.)
 function Audiobook:_lidQuietOn()
     if self._lid_quiet then return end
     self._lid_quiet = {}
@@ -5752,39 +5751,22 @@ function Audiobook:_lidQuietOn()
             pcall(powerd.turnOffFrontlight, powerd)
         end
     end
-    local input = Device.input
-    if input and input.handleTouchEv and input.voidEv then
-        self._lid_quiet.touch = input.handleTouchEv
-        input.handleTouchEv = input.voidEv
-        pcall(input.resetState, input)
-    end
-    logger.warn("Audiobook: lid closed while playing: light off, touch off",
+    logger.warn("Audiobook: lid closed while playing: light off",
         self._lid_quiet.light and "(light was on)" or "")
 end
 
---- Undo _lidQuietOn: touch back, frontlight back if it was on.
+--- Undo _lidQuietOn: frontlight back if it was on.
 function Audiobook:_lidQuietOff()
     local q = self._lid_quiet
     if not q then return end
     self._lid_quiet = nil
-    local input = Device.input
-    if q.touch and input then
-        if input._abs_ev_handler == input.voidEv then
-            -- KOReader's own short input block is running and saved our
-            -- void handler: hand it the real one to restore instead.
-            input._abs_ev_handler = q.touch
-        else
-            input.handleTouchEv = q.touch
-        end
-        pcall(input.resetState, input)
-    end
     if q.light then
         local ok_p, powerd = pcall(function() return Device:getPowerDevice() end)
         if ok_p and powerd and powerd.turnOnFrontlight then
             pcall(powerd.turnOnFrontlight, powerd)
         end
     end
-    logger.warn("Audiobook: lid opened: touch on", q.light and ", light on" or "")
+    logger.warn("Audiobook: lid opened", q.light and ": light on" or "")
 end
 
 function Audiobook:_installSleepCoverOverride()
