@@ -1,10 +1,11 @@
 --[[--
 Tap to sync: set the read-along highlight offset from one tap.
 
-While the audiobook plays, the user taps the word they hear at that moment.
-The tapped word's place in its line (by characters) gives the time the
-narration should reach it; the gap between that and what is heard now is
-the offset. Positive = highlight later (same sign as smil_sync_offset_ms).
+A large dialog names one word coming up in the narration (the first word
+of a line) and the user taps anywhere the moment they hear it.
+Its time is the start of its line, and the gap between that and what is
+heard at the tap is the offset. Positive = highlight later (same sign as
+smil_sync_offset_ms).
 
 Kept apart from the rest of the sync UI so any control can start it:
     Audiobook:startTapToSync()
@@ -115,35 +116,159 @@ function TapSync.describe(ms)
     return T(_("Highlight now %1 s earlier"), s)
 end
 
--- ── The tap ──────────────────────────────────────────────────────────
+-- ── Choosing the word to listen for ──────────────────────────────────
 
-local TapCatcher = InputContainer:extend{
+TapSync.LEAD_S = 3     -- the word comes at least this far ahead, to get ready
+TapSync.MISS_S = 4     -- this long after the word with no tap: pick another
+
+--- The first word of a line, as printed (punctuation around it dropped).
+local QUOTES = { "“", "”", "‘", "’", "«", "»", "—", "–", "…" }
+
+function TapSync.firstWord(text)
+    for token in (text or ""):gmatch("%S+") do
+        -- Typographic quotes and dashes are letters to %w's eyes (bytes
+        -- over 127): take them off the ends like ASCII punctuation.
+        local changed = true
+        while changed do
+            changed = false
+            local before = token
+            token = token:gsub("^%p+", ""):gsub("%p+$", "")
+            for _i, q in ipairs(QUOTES) do
+                if token:sub(1, #q) == q then token = token:sub(#q + 1) end
+                if #token >= #q and token:sub(-#q) == q then token = token:sub(1, -#q - 1) end
+            end
+            changed = token ~= before
+        end
+        if token:find("[%w\128-\255]") then return token end
+    end
+    return nil
+end
+
+--- The line to listen for: the first one after `from_idx` that starts at
+--- least lead_s after `now` and has a word to show.
+-- @treturn number|nil index into timing_data
+function TapSync.pickTarget(timing_data, from_idx, now, lead_s)
+    if not timing_data then return nil end
+    now = now or 0
+    for i = math.max(1, (from_idx or 0) + 1), #timing_data do
+        local e = timing_data[i]
+        if e.start_time and e.start_time >= now + (lead_s or TapSync.LEAD_S)
+                and TapSync.firstWord(e.text) then
+            -- Further than a minute ahead is another chapter, not a cue.
+            if e.start_time > now + 60 then return nil end
+            return i
+        end
+    end
+    return nil
+end
+
+-- ── The dialog ───────────────────────────────────────────────────────
+
+local Blitbuffer = require("ffi/blitbuffer")
+local Button = require("ui/widget/button")
+local CenterContainer = require("ui/widget/container/centercontainer")
+local Font = require("ui/font")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local Size = require("ui/size")
+local TextBoxWidget = require("ui/widget/textboxwidget")
+local TextWidget = require("ui/widget/textwidget")
+local VerticalGroup = require("ui/widget/verticalgroup")
+local VerticalSpan = require("ui/widget/verticalspan")
+
+local TapDialog = InputContainer:extend{
     name = "AudiobookTapToSync",
-    -- Invisible and full screen; nothing is drawn, so no e-ink refresh.
+    modal = true,
 }
 
-function TapCatcher:init()
-    self.dimen = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+function TapDialog:init()
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    self.dimen = Geom:new{ x = 0, y = 0, w = sw, h = sh }
+    local w = math.floor(sw * 0.9)
+    local pad = Size.padding.large * 2
+    local inner = w - 2 * pad
+    self.word_widget = TextWidget:new{
+        text = " ", face = Font:getFace("cfont", 40), bold = true, max_width = inner,
+    }
+    self.line_widget = TextBoxWidget:new{
+        text = " ", face = Font:getFace("cfont", 20), width = inner,
+        alignment = "center", height = Screen:scaleBySize(80),
+        height_overflow_show_ellipsis = true,
+    }
+    self.status_widget = TextWidget:new{
+        text = _("Get ready…"), face = Font:getFace("cfont", 22), max_width = inner,
+    }
+    self.cancel = Button:new{
+        text = _("Cancel"), width = math.floor(inner / 2),
+        text_font_size = 22,
+        callback = function() if self.on_cancel then self.on_cancel() end end,
+        show_parent = self,
+    }
+    local function span(n) return VerticalSpan:new{ width = n or pad } end
+    self.frame = FrameContainer:new{
+        background = Blitbuffer.COLOR_WHITE,
+        bordersize = Size.border.window,
+        radius = Size.radius.window,
+        padding = pad,
+        width = w,
+        VerticalGroup:new{
+            align = "center",
+            TextWidget:new{ text = _("Tap to sync"), face = Font:getFace("cfont", 26), bold = true },
+            span(),
+            TextWidget:new{ text = _("Listen for"), face = Font:getFace("cfont", 22) },
+            self.word_widget,
+            span(Size.padding.large),
+            self.line_widget,
+            span(),
+            TextBoxWidget:new{
+                text = _("Tap anywhere the moment you hear it."),
+                face = Font:getFace("cfont", 24), bold = true, width = inner,
+                alignment = "center",
+            },
+            span(Size.padding.large),
+            self.status_widget,
+            span(),
+            self.cancel,
+        },
+    }
+    self[1] = CenterContainer:new{ dimen = Geom:new{ w = sw, h = sh }, self.frame }
     self.ges_events = {
         TapSync = { GestureRange:new{ ges = "tap", range = self.dimen } },
-        -- A swipe or hold cancels instead of turning the page under us.
-        CancelSwipe = { GestureRange:new{ ges = "swipe", range = self.dimen } },
-        CancelHold = { GestureRange:new{ ges = "hold", range = self.dimen } },
+        -- A swipe or hold does nothing: the page must not turn under us.
+        Swallow = { GestureRange:new{ ges = "swipe", range = self.dimen } },
+        SwallowHold = { GestureRange:new{ ges = "hold", range = self.dimen } },
     }
 end
 
-function TapCatcher:paintTo() end
+--- Show the line to listen for: its first word large, the line under it.
+function TapDialog:setTarget(word, line)
+    self.word_widget:setText("“" .. word .. "”")
+    self.line_widget:setText(line or "")
+    self.status_widget:setText(_("Get ready…"))
+    UIManager:setDirty(self, function() return "ui", self.frame.dimen end)
+end
 
-function TapCatcher:onTapSync(_arg, ges)
+function TapDialog:setStatus(text)
+    self.status_widget:setText(text)
+    UIManager:setDirty(self, function() return "fast", self.frame.dimen end)
+end
+
+function TapDialog:onTapSync(_arg, ges)
+    local c = self.cancel.dimen
+    if c and ges and ges.pos and ges.pos:intersectWith(c) then
+        if self.on_cancel then self.on_cancel() end
+        return true
+    end
     if self.on_tap then self.on_tap(ges) end
     return true
 end
 
-function TapCatcher:onCancelSwipe()
-    if self.on_cancel then self.on_cancel() end
-    return true
+function TapDialog:onSwallow() return true end
+TapDialog.onSwallowHold = TapDialog.onSwallow
+
+function TapDialog:onCloseWidget()
+    local d = self.frame and self.frame.dimen
+    UIManager:setDirty(nil, function() return "ui", d end)
 end
-TapCatcher.onCancelHold = TapCatcher.onCancelSwipe
 
 --- Narration time heard at the moment of the tap (s).
 local function heardAt(ms, ges)
@@ -153,43 +278,15 @@ local function heardAt(ms, ges)
     -- Take back the time between the finger and this callback.
     local ok, since = pcall(function()
         local time = require("ui/time")
-        return ges.time and time.to_s(time.since(ges.time)) or 0
+        return ges and ges.time and time.to_s(time.since(ges.time)) or 0
     end)
     if ok and since and since > 0 and since < 2 then pos = pos - since end
     return pos - lat
 end
 
---- Resolve the tap to an offset. Returns new_ms, or nil and a reason.
-function TapSync.fromTap(plugin, ges, heard)
-    local ms = plugin.media_sync
-    local doc = plugin.ui and plugin.ui.document
-    local view = plugin.ui and plugin.ui.view
-    if not (ms and doc and view and ges and ges.pos) then return nil end
-    local page_pos = view:screenToPageTransform(ges.pos)
-    local word = page_pos and doc:getWordFromPosition(page_pos)
-    if not (word and word.word and word.word ~= "") then return nil end
-    local sel = { text = word.word, pos0 = word.pos0, pos1 = word.pos1 }
-    local entry = plugin:_matchSmilEntryFromSelection(sel, ms.timing_data, plugin._smil_parser)
-    if not entry then return nil end
-    -- A few words before the tapped one, to tell repeats apart.
-    local before
-    pcall(function()
-        local xp = word.pos0
-        for _i = 1, 4 do
-            local prev = doc:getPrevVisibleWordStart(xp)
-            if not prev or prev == xp then break end
-            xp = prev
-        end
-        if xp ~= word.pos0 then before = doc:getTextFromXPointers(xp, word.pos0) end
-    end)
-    local share = TapSync.wordShare(entry.text, word.word, before)
-    local new_ms = TapSync.offsetFor(heard, entry, share)
-    logger.info("TapSync:", word.word, "heard", heard, "line", entry.start_time,
-        entry.end_time, "share", share, "->", new_ms)
-    return new_ms
-end
-
---- Ask for a tap on the word being heard, then set the offset from it.
+--- A large dialog shows one word coming up in the narration, and the user
+--- taps anywhere when they hear it. The word is the first of its line, so
+--- its time is the line's start, and the gap to the tap is the offset.
 -- @tparam table plugin the Audiobook plugin
 -- @tparam[opt] function on_done called with the new offset (ms) once set
 function TapSync.start(plugin, on_done)
@@ -198,75 +295,91 @@ function TapSync.start(plugin, on_done)
         local InfoMessage = require("ui/widget/infomessage")
         UIManager:show(InfoMessage:new{ text = text, timeout = 3 })
     end
-    -- Paused is fine here (a menu may have paused it); the tap needs play.
-    if not (ms and ms.timing_data and ms.state ~= ms.STATE.STOPPED) then
+    if not (ms and ms.timing_data and ms.state == ms.STATE.PLAYING) then
         info(_("Play the audiobook first, then Tap to sync."))
         return
     end
     local bar = ms.playback_bar
-    -- The tap is on the page: get the full-screen player out of the way.
+    -- Back to the page: the full-screen player would sit under the dialog.
     if bar and not bar._minimized and bar.onMinimize then
         local ok, err = pcall(bar.onMinimize, bar)
         if not ok then logger.warn("TapSync: minimize failed:", err) end
     end
-    local function hint(text, keep)
-        if bar and bar._showHint then
-            pcall(bar._showHint, bar, text)
-            -- Stays up while waiting for the tap.
-            if keep and bar._hint_timer then
-                UIManager:unschedule(bar._hint_timer)
-                bar._hint_timer = nil
-            end
-        else
-            info(text)
-        end
-    end
-    local function closeHint()
-        if bar and bar._closeHint then pcall(bar._closeHint, bar) end
-    end
 
-    local catcher = TapCatcher:new{}
-    local done = false
+    local dlg = TapDialog:new{}
+    local target, done = nil, false
+    local watch
     local function finish()
         if done then return false end
         done = true
-        UIManager:unschedule(catcher.timeout)
-        UIManager:close(catcher)
-        closeHint()
+        UIManager:unschedule(watch)
+        UIManager:close(dlg)
         return true
     end
-    catcher.timeout = function()
-        if finish() then hint(_("Tap to sync stopped.")) end
+    local function now() return heardAt(ms, nil) end
+    local function choose()
+        local from = math.max(ms._current_sentence_idx or 0, target or 0)
+        target = TapSync.pickTarget(ms.timing_data, from, now(), TapSync.LEAD_S)
+        if not target then return false end
+        local e = ms.timing_data[target]
+        dlg:setTarget(TapSync.firstWord(e.text), e.text)
+        return true
     end
-    catcher.on_cancel = catcher.timeout
-    catcher.on_tap = function(ges)
+    -- Every half second: "any moment now" once the word is close, another
+    -- word if it went by with no tap, stop if playback stopped.
+    local tries, said_now = 0, false
+    watch = function()
+        if done then return end
+        if ms.state ~= ms.STATE.PLAYING then
+            if finish() then info(_("Tap to sync stopped: the audiobook is not playing.")) end
+            return
+        end
+        local e = target and ms.timing_data[target]
+        local t = now()
+        if e and t > e.start_time + TapSync.MISS_S then
+            tries = tries + 1
+            if tries >= 3 or not choose() then
+                if finish() then info(_("Tap to sync stopped.")) end
+                return
+            end
+            said_now = false
+        elseif e and not said_now and t >= e.start_time - 1.5 then
+            said_now = true
+            dlg:setStatus(_("Any moment now…"))
+        end
+        UIManager:scheduleIn(0.5, watch)
+    end
+    dlg.on_cancel = function() finish() end
+    dlg.on_tap = function(ges)
         -- The clock first, before anything slow.
         local heard = heardAt(ms, ges)
-        if not finish() then return end
-        if ms.state ~= ms.STATE.PLAYING then
-            hint(_("The audiobook is paused. Play it, then Tap to sync."))
+        local e = target and ms.timing_data[target]
+        if not e then return end
+        if heard < e.start_time - 5 then
+            dlg:setStatus(_("Not yet: tap when you hear the word."))
             return
         end
-        local ok, new_ms = pcall(TapSync.fromTap, plugin, ges, heard)
-        if not ok then
-            logger.warn("TapSync: failed:", new_ms)
-            new_ms = nil
-        end
+        local new_ms = TapSync.offsetFor(heard, e, 0)
+        logger.info("TapSync:", TapSync.firstWord(e.text), "heard", heard,
+            "line", e.start_time, "->", new_ms)
         if not new_ms then
-            hint(_("That word isn't near the narration. Try Tap to sync again."))
+            dlg:setStatus(_("That was far from the word. Listen for it again."))
             return
         end
+        finish()
         TapSync.setOffset(plugin, new_ms)
-        -- The minimized bar already shows the new value above itself.
         if not (bar and bar._minimized and bar.on_sync_nudge) then
-            hint(TapSync.describe(new_ms))
+            info(TapSync.describe(new_ms))
         end
         if on_done then pcall(on_done, new_ms) end
     end
 
-    hint(_("Tap the word you hear now"), true)
-    UIManager:show(catcher)
-    UIManager:scheduleIn(TapSync.WAIT_S, catcher.timeout)
+    if not choose() then
+        info(_("No line coming up to listen for. Try again in a moment."))
+        return
+    end
+    UIManager:show(dlg)
+    UIManager:scheduleIn(0.5, watch)
 end
 
 return TapSync
