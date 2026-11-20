@@ -2255,6 +2255,9 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- Kept so the clock's 1 Hz repaint covers the whole centre width: the
     -- time widget's own rect shrinks to its last text, which clipped
     -- "0:16 / 15:34" to "0:16 / 15:3".
+    -- The stack places each line once, from its width at the time, so it
+    -- is told to place them again when a line's text changes.
+    self._mini_center_stack = mini_center
     self._mini_center_box = CenterContainer:new{
         dimen = Geom:new{ w = center_max_width, h = inner_h },
         mini_center,
@@ -2653,6 +2656,8 @@ function AudiobookPlayer:_fitMiniTime(text)
         t.face = Font:getFace("cfont", fitSize(text, { 15, 14, 13, 12, 11, 10 }, max_w))
     end
     t:setText(text)
+    local stack = self._mini_center_stack
+    if stack and stack.resetLayout then stack:resetLayout() end
 end
 
 --- Set the bar's title line so it always fits (one line: shrink; the
@@ -2667,6 +2672,8 @@ function AudiobookPlayer:_fitMiniTitle(text)
         t.face = Font:getFace("cfont", fitSize(text, { 17, 15, 13, 12, 11 }, max_w, true))
     end
     t:setText(text)
+    local stack = self._mini_center_stack
+    if stack and stack.resetLayout then stack:resetLayout() end
 end
 
 function AudiobookPlayer:_updateMiniWidgets()
