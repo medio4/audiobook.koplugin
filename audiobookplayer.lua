@@ -2899,6 +2899,37 @@ local function installMenuFit()
             return orig(tm, ...)
         end
     end
+    -- The height above only bounds TouchMenu's own estimate of a row.
+    -- Themes with taller rows (ZenOS) still ran past the bar, so after
+    -- laying a page out, measure it: if it ends below the bar, put fewer
+    -- items on each page and lay it out again.
+    if ok_t and TouchMenu and TouchMenu.updateItems then
+        local orig_update = TouchMenu.updateItems
+        TouchMenu.updateItems = function(tm, ...)
+            if tm._ab_base_max then tm.max_per_page = tm._ab_base_max end
+            local r = orig_update(tm, ...)
+            local ok, y = pcall(menuRoomAboveBar)
+            local d = tm.dimen
+            if not (ok and y and d and d.h and tm.perpage and tm.perpage > 1) then
+                return r
+            end
+            local bottom = (d.y or 0) + d.h
+            if bottom <= y then return r end
+            local item_group_h = tm.item_group and tm.item_group:getSize().h or d.h
+            local row_h = item_group_h / (tm.perpage + 2) -- rows + tab bar + footer, roughly
+            local cut = math.max(1, math.ceil((bottom - y) / math.max(1, row_h)))
+            tm._ab_base_max = tm._ab_base_max or tm.max_per_page
+            tm.max_per_page = math.max(1, tm.perpage - cut)
+            r = orig_update(tm, ...)
+            -- Still too tall (rows taller than guessed): one more step.
+            d = tm.dimen
+            if d and ((d.y or 0) + d.h) > y and tm.perpage > 1 then
+                tm.max_per_page = tm.perpage - 1
+                r = orig_update(tm, ...)
+            end
+            return r
+        end
+    end
     local ok_m, Menu = pcall(require, "ui/widget/menu")
     if ok_m and Menu and Menu.init then
         local orig = Menu.init
