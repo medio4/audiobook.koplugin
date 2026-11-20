@@ -1049,6 +1049,10 @@ function MediaSync:stop(keep_chapter_menu, opts)
     if not track_transition and self.plugin then
         self.plugin._play_from_page = nil
     end
+    -- A stop drops the re-timing look; the next play starts in the
+    -- reader's own style.
+    self._retime = nil
+    if self.highlight_manager then self.highlight_manager.retime_style = nil end
     local was_playing = self.state ~= self.STATE.STOPPED
     -- Sync ReaderRolling to the page actually shown before the stop
     -- re-renders, or the view snaps back to the session start.
@@ -2291,6 +2295,16 @@ function MediaSync:_updateHighlightAtTime(pos)
         return
     end
 
+    -- After a sync nudge the highlight wears the re-timing look until the
+    -- new timing has caught up: the first line change after it settles.
+    if self._retime then
+        local now = time.now()
+        if (sent_idx ~= self._current_sentence_idx and now >= self._retime.min_until)
+                or now >= self._retime.max_until then
+            self:_endRetimeLook()
+        end
+    end
+
     -- Update sentence highlight if changed
     if sent_idx ~= self._current_sentence_idx then
         self._current_sentence_idx = sent_idx
@@ -2508,6 +2522,35 @@ function MediaSync:_narrationCaughtUp(sent_idx)
     logger.warn("MediaSync: narration reached the page on screen (", line_page,
         "); following again")
     return true
+end
+
+--- Sync nudge: draw the highlight in the re-timing look (an outline, or a
+--- dashed underline for Box readers) until the next line under the new
+--- timing. Repeated nudges keep it on. One partial refresh in, one out.
+function MediaSync:_startRetimeLook()
+    local hm = self.highlight_manager
+    if not hm or self.detached then return end
+    local now = time.now()
+    self._retime = {
+        min_until = now + time.s(1.5), -- a quick double tap is one change
+        max_until = now + time.s(10),  -- never stuck if no line change comes
+    }
+    if hm.retime_style == nil then
+        hm.retime_style = hm:retimeStyleFor()
+        -- Redraw the current line in the new look on the next tick.
+        self._highlighted_sentence_idx = nil
+        self._hl_retry_at = nil
+    end
+end
+
+function MediaSync:_endRetimeLook()
+    self._retime = nil
+    local hm = self.highlight_manager
+    if hm and hm.retime_style ~= nil then
+        hm.retime_style = nil
+        self._highlighted_sentence_idx = nil
+        self._hl_retry_at = nil
+    end
 end
 
 function MediaSync:_ensureSentenceHighlighted(sentence, sent_idx)
@@ -3154,6 +3197,7 @@ function MediaSync:showPlaybackBar()
             if not p.getSetting then return nil end
             local v = (p:getSetting("smil_sync_offset_ms", 0) or 0) + delta_ms
             p:setSetting("smil_sync_offset_ms", v, true)
+            pcall(self._startRetimeLook, self)
             return v
         end or nil,
         on_sync_control = self.overlay_mode and self.plugin and self.plugin.showSyncControl

@@ -62,6 +62,9 @@ local HighlightManager = {
         BACKGROUND = "background",
         BOX = "box",
         INVERT = "invert",
+        -- Internal only (not in the style menu): the "re-timing" look for
+        -- readers whose own style is already Box.
+        DASHED = "dashed",
     },
 }
 
@@ -182,6 +185,21 @@ end
 
 function HighlightManager:getStyle()
     return self.current_style
+end
+
+--- The style actually drawn: the re-timing look while a sync change
+--- settles (mediasync sets retime_style), else the reader's own style.
+function HighlightManager:drawStyle()
+    return self.retime_style or self.current_style
+end
+
+--- The look that stands out against the reader's own style: an outline,
+--- or a dashed underline when the reader already uses the outline (Box).
+function HighlightManager:retimeStyleFor(style)
+    if (style or self.current_style) == self.STYLES.BOX then
+        return self.STYLES.DASHED
+    end
+    return self.STYLES.BOX
 end
 
 --[[--
@@ -549,7 +567,7 @@ function HighlightManager:_highlightByFragmentId(doc, fragment_id, sentence)
     self._selection_active = true
     self.is_highlighting = true
     self._pending_boxes = nil
-    if self.current_style ~= self.STYLES.INVERT then
+    if self:drawStyle() ~= self.STYLES.INVERT then
         self._pending_boxes = boxes
         self:_captureViewForBoxes()
         self:_ensureViewModule()
@@ -1024,7 +1042,7 @@ function HighlightManager:_paintOverlay(bb, _x, _y)
         return
     end
     if not bb then return end
-    local style = self.current_style
+    local style = self:drawStyle()
     local line_w = Screen:scaleBySize(2)
     local sw, sh = Screen:getWidth(), Screen:getHeight()
 
@@ -1068,6 +1086,18 @@ function HighlightManager:_paintOverlay(bb, _x, _y)
                 -- Right
                 bb:paintRect(bx + bw - line_w, by, line_w, bh,
                     Blitbuffer.COLOR_BLACK)
+            elseif style == self.STYLES.DASHED then
+                -- Dashed underline: plain black dashes, no greys, so the
+                -- partial e-ink refresh stays fast and clean.
+                local dash = Screen:scaleBySize(6)
+                local gap = Screen:scaleBySize(4)
+                local dx = bx
+                while dx < bx + bw do
+                    local seg = math.min(dash, bx + bw - dx)
+                    bb:paintRect(dx, by + bh - line_w, seg, line_w,
+                        Blitbuffer.COLOR_BLACK)
+                    dx = dx + dash + gap
+                end
             end
         end
     end
