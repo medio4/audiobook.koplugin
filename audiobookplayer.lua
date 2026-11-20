@@ -1469,6 +1469,8 @@ function AudiobookPlayer:updateTimeDisplay(current_sec, total_sec, force)
     if text == self.current_time_str and not force then return end
     self.current_time_str = text
     self.time_widget:setText(text)
+    -- A sync note owns the bar's clock line until it times out.
+    if self._sync_note_timer then return end
     if self._mini_time then
         self:_fitMiniTime(text)
     end
@@ -2271,7 +2273,8 @@ end
 function AudiobookPlayer:_syncText(offset_ms)
     if not offset_ms then
         local p = self.plugin
-        offset_ms = (p and p.getSetting and p:getSetting("smil_sync_offset_ms", 0)) or 0
+        offset_ms = (p and p.getSyncOffsetMs and p:getSyncOffsetMs())
+            or (p and p.getSetting and p:getSetting("smil_sync_offset_ms", 0)) or 0
     end
     return string.format("Sync %+.1f s", offset_ms / 1000)
 end
@@ -2286,7 +2289,11 @@ function AudiobookPlayer:_nudgeSync(delta_ms)
     if self.sync_widget then
         self.sync_widget:setText(self:_syncText(v))
     end
-    if self._minimized then
+    if self._minimized and self._mini_time then
+        -- A small note in the bar's clock line, only while adjusting.
+        local ok, err = pcall(self._showSyncNote, self, v)
+        if not ok then logger.err("AudiobookPlayer: sync note failed:", err) end
+    elseif self._minimized then
         local ok, err = pcall(self._showSyncOverlay, self, v)
         if not ok then logger.err("AudiobookPlayer: sync overlay failed:", err) end
     elseif self._sync_label_box then
@@ -2655,7 +2662,7 @@ function AudiobookPlayer:_updateMiniWidgets()
     if self._mini_title and not self.tts_mode and self._mini_title_built_text ~= track then
         self:_fitMiniTitle(track)
     end
-    if self._mini_time then
+    if self._mini_time and not self._sync_note_timer then
         self:_fitMiniTime(self.current_time_str or "")
     end
     self:_refreshPlayButton(self._mini_play_pause)
@@ -2817,6 +2824,7 @@ function AudiobookPlayer:hide()
     -- touch a widget that is being torn down).
     self._tts_info_active = false
     self:_closeSyncOverlay()
+    self:_closeSyncNote()
     UIManager:close(self)
     UIManager:setDirty("all", "full")
 end
@@ -3596,6 +3604,7 @@ function AudiobookPlayer:onCloseWidget()
         self._speed_dialog = nil
     end
     self:_closeSyncOverlay()
+    self:_closeSyncNote()
 end
 
 --- Read-along sync nudges: show the new offset in a box just above the mini
@@ -3684,6 +3693,33 @@ function AudiobookPlayer:_closeHint()
     if self._hint then
         UIManager:close(self._hint, "ui", self._hint_rect)
         self._hint = nil
+    end
+end
+
+--- Read-along sync nudge on the bar: the offset replaces the clock line
+--- ("Sync +0.8 s") for a few seconds, then the clock comes back. Fitted
+--- like the clock, so it always fits the bar.
+function AudiobookPlayer:_showSyncNote(offset_ms)
+    if not self._mini_time then return end
+    self:_fitMiniTime(string.format("Sync %+.1f s", offset_ms / 1000))
+    -- The note and the clock differ in width: repaint the whole bar.
+    UIManager:setDirty(self, function() return "fast", self.dimen end)
+    if self._sync_note_timer then
+        UIManager:unschedule(self._sync_note_timer)
+    end
+    self._sync_note_timer = function() self:_closeSyncNote() end
+    UIManager:scheduleIn(SYNC_OVERLAY_SECONDS, self._sync_note_timer)
+end
+
+function AudiobookPlayer:_closeSyncNote()
+    if not self._sync_note_timer then return end
+    UIManager:unschedule(self._sync_note_timer)
+    self._sync_note_timer = nil
+    if self._mini_time then
+        self:_fitMiniTime(self.current_time_str or "")
+        if self._minimized then
+            UIManager:setDirty(self, function() return "fast", self.dimen end)
+        end
     end
 end
 

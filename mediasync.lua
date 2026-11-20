@@ -1789,7 +1789,8 @@ function MediaSync:_commitSelection()
     -- previous one for the length of the offset.
     local off = 0
     if self.plugin and self.plugin.getSetting then
-        off = (self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
+        off = (self.plugin.getSyncOffsetMs and self.plugin:getSyncOffsetMs()
+                or self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
     end
     local t = entry.start_time + off
     if entry.end_time and entry.end_time > entry.start_time and t >= entry.end_time then
@@ -2257,7 +2258,8 @@ function MediaSync:_startSyncLoop(gen)
         local lat = (self.media_engine and self.media_engine.position_latency_s) or 0
         local off = 0
         if self.plugin and self.plugin.getSetting then
-            off = (self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
+            off = (self.plugin.getSyncOffsetMs and self.plugin:getSyncOffsetMs()
+                or self.plugin:getSetting("smil_sync_offset_ms", 0) or 0) / 1000
         end
         -- While line skip is selecting, the highlight shows the selection;
         -- the audio keeps playing until the selection is committed.
@@ -3119,7 +3121,12 @@ function MediaSync:showPlaybackBar()
             and self.plugin:getSetting("player_line_view", false) or nil,
         on_sync_nudge = self.overlay_mode and function(delta_ms)
             local p = self.plugin
-            if not (p and p.getSetting) then return nil end
+            if not p then return nil end
+            -- Per book (written when the book closes, not per tap).
+            if p.getSyncOffsetMs then
+                return p:setSyncOffsetMs(p:getSyncOffsetMs() + delta_ms)
+            end
+            if not p.getSetting then return nil end
             local v = (p:getSetting("smil_sync_offset_ms", 0) or 0) + delta_ms
             -- No flush: writing the whole reader settings file on every tap
             -- froze the UI for seconds on e-ink devices.

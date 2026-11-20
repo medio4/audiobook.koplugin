@@ -580,6 +580,33 @@ function Audiobook:onReaderFooterVisibilityChange()
     end)
 end
 
+-- ── Read-along sync offset (per book) ────────────────────────────────
+-- Narrations differ, so each book keeps its own offset. The global
+-- smil_sync_offset_ms is the starting value for books without one.
+
+--- How far the highlight is shifted (ms; positive = later): this book's
+--- own value, else the global default.
+function Audiobook:getSyncOffsetMs()
+    local ds = self.ui and self.ui.document and self.ui.doc_settings
+    local v = ds and ds:readSetting("audiobook_sync_offset_ms")
+    if v == nil then v = self:getSetting("smil_sync_offset_ms", 0) end
+    return tonumber(v) or 0
+end
+
+--- Store the offset for the open book (the global default when no book
+--- is open). Book settings are written when the book closes, so a run of
+--- taps never stalls the UI with file writes.
+function Audiobook:setSyncOffsetMs(v)
+    v = math.floor((tonumber(v) or 0) + 0.5)
+    local ds = self.ui and self.ui.document and self.ui.doc_settings
+    if ds then
+        ds:saveSetting("audiobook_sync_offset_ms", v)
+    else
+        self:setSetting("smil_sync_offset_ms", v, true)
+    end
+    return v
+end
+
 function Audiobook:onAudiobookShowPlayer()
     local bar = self.media_sync and self.media_sync.playback_bar
     if bar and bar.openFull then pcall(bar.openFull, bar) end
@@ -867,17 +894,22 @@ function Audiobook:addToMainMenu(menu_items)
                     },
                     {
                         text_func = function()
-                            local off = self:getSetting("smil_sync_offset_ms", 0)
-                            return T(_("Overlay sync offset: %1 s"), string.format("%+.1f", off / 1000))
+                            local off = self:getSyncOffsetMs()
+                            local label = (self.ui and self.ui.document)
+                                and _("Sync offset (this book): %1 s") or _("Sync offset (default): %1 s")
+                            return T(label, string.format("%+.1f", off / 1000))
                         end,
                         keep_menu_open = true,
                         callback = function(touchmenu_instance)
                             local SpinWidget = require("ui/widget/spinwidget")
-                            local cur = self:getSetting("smil_sync_offset_ms", 0)
+                            local has_book = (self.ui and self.ui.document) and true or false
+                            local function refresh()
+                                if touchmenu_instance then touchmenu_instance:updateItems() end
+                            end
                             UIManager:show(SpinWidget:new{
-                                title_text = _("Overlay sync offset"),
+                                title_text = has_book and _("Sync offset for this book") or _("Default sync offset"),
                                 info_text = _("Positive values delay the highlight (use when the highlight runs ahead of the narration); negative values advance it."),
-                                value = cur / 1000,
+                                value = self:getSyncOffsetMs() / 1000,
                                 value_min = -60,
                                 value_max = 60,
                                 value_step = 0.5,
@@ -885,12 +917,20 @@ function Audiobook:addToMainMenu(menu_items)
                                 precision = "%.1f",
                                 ok_text = _("Set"),
                                 callback = function(spin)
-                                    self:setSetting("smil_sync_offset_ms", math.floor(spin.value * 1000))
-                                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                                    self:setSyncOffsetMs(spin.value * 1000)
+                                    refresh()
                                 end,
+                                -- Also make it the starting value for books
+                                -- that have no offset of their own.
+                                extra_text = has_book and _("Set as default too") or nil,
+                                extra_callback = has_book and function(spin)
+                                    local v = self:setSyncOffsetMs(spin.value * 1000)
+                                    self:setSetting("smil_sync_offset_ms", v)
+                                    refresh()
+                                end or nil,
                             })
                         end,
-                        help_text = _("Shifts EPUB Media Overlay sentence highlighting relative to the audio. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio."),
+                        help_text = _("Shifts the read-along highlight relative to the audio. Each book remembers its own offset, since narrations differ; books without one start from the default. With a book open this sets that book's offset (\"Set as default too\" also makes it the default); with no book open it sets the default."),
                     },
                 },
             },
