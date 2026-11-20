@@ -1293,7 +1293,15 @@ end
 function AudiobookPlayer:setPlaying(is_playing)
     -- Always push the icon/text even when the boolean is unchanged: on Boox
     -- the mini-bar dirty region sometimes misses the first toggle.
+    local was_playing = self.is_playing
     self.is_playing = is_playing and true or false
+    -- The choice buttons differ between playing and paused.
+    if self._return_hint_active and was_playing ~= self.is_playing
+            and self:_rebuildChoiceBar() then
+        self:_refreshPlayButton(self.play_pause_button)
+        self:_refreshPlayButton(self._mini_play_pause)
+        return
+    end
     self:_refreshPlayButton(self.play_pause_button)
     self:_refreshPlayButton(self._mini_play_pause)
     if self._minimized then
@@ -1814,7 +1822,40 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- stays uncluttered.  With line skip they sit on the right, away from
     -- the transport cluster.
     local left_buttons = {}
-    if line_skip then
+    -- Off the read-along page: the line buttons give way to the ways back
+    -- (paused: play here / resume / go back; playing: pause / go back),
+    -- and return once the view is back in sync (setReturnHint rebuilds).
+    local choice_extra_w = 0
+    self._mini_choice_buttons = nil
+    if line_skip and self._return_hint_active and self.on_return_choice_kind then
+        local function choice(text, kind)
+            return Button:new{
+                text = text,
+                width = play_w,
+                height = play_h,
+                text_font_size = 15,
+                text_font_bold = true,
+                bordersize = Size.border.thick,
+                radius = Screen:scaleBySize(10),
+                callback = function() self.on_return_choice_kind(kind) end,
+                show_parent = self,
+            }
+        end
+        if self.is_playing then
+            self._mini_choice_buttons = { choice(_("↩ Back"), "back") }
+            left_buttons = { self._mini_play_pause, self._mini_choice_buttons[1] }
+            choice_extra_w = play_w - 2 * mini_btn_size
+        else
+            self._mini_choice_buttons = {
+                choice(_("▶ Here"), "page"),
+                choice(_("▶ Resume"), "mark"),
+                choice(_("↩ Back"), "back"),
+            }
+            left_buttons = { self._mini_choice_buttons[1], self._mini_choice_buttons[2],
+                self._mini_choice_buttons[3] }
+            choice_extra_w = 2 * play_w - 2 * mini_btn_size
+        end
+    elseif line_skip then
         left_buttons = { self._mini_line_back, self._mini_play_pause, self._mini_line_forward }
     else
         left_buttons = { self._mini_play_pause }
@@ -1836,6 +1877,8 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- Whatever width the buttons leave goes to the centered title stack.
     local center_max_width = self.width - play_w
         - mini_btn_size * (n_buttons) - gap * n_gaps - Size.line.medium
+        - choice_extra_w
+    center_max_width = math.max(mini_btn_size, center_max_width)
 
     -- Create the centered title stack now that side buttons have reserved
     -- their full width, so the text cannot overlap the volume/sync buttons.
@@ -2238,7 +2281,8 @@ function AudiobookPlayer:_updateMiniWidgets()
     -- "Return to read-aloud" cue (tapping the bar centers on the sentence).
     local track
     if self._return_hint_active then
-        track = self.on_return_choice and _("Off the read-along page: tap ▶")
+        track = (self._mini_choice_buttons and _("Off the read-along page"))
+            or (self.on_return_choice and _("Off the read-along page: tap ▶"))
             or _("Return to read-aloud")
     else
         track = self.chapter_title
@@ -2368,10 +2412,25 @@ end
 --- Toggle Readest-style "return to read-aloud" cue on the mini bar.
 -- When active, tapping the mini bar (outside transport buttons) refocuses
 -- instead of expanding the full player.
+--- Large bar with the ways back: rebuild it so the choice buttons appear
+--- or the line buttons come back (the layout differs, not just labels).
+function AudiobookPlayer:_rebuildChoiceBar()
+    if not (self.large_mini_bar and self.on_return_choice_kind) then return false end
+    self:_buildLargeMiniBar()
+    self:_updateMiniWidgets()
+    if self._minimized then
+        UIManager:setDirty(self, function()
+            return "ui", self.dimen
+        end)
+    end
+    return true
+end
+
 function AudiobookPlayer:setReturnHint(active)
     active = not not active
     if self._return_hint_active == active then return end
     self._return_hint_active = active
+    if self:_rebuildChoiceBar() then return end
     if self._minimized then
         self:_updateMiniWidgets()
         UIManager:setDirty(self, function()
@@ -2524,6 +2583,15 @@ function AudiobookPlayer:handleEvent(event)
                     self._moving = { grab = ges.pos.y - mini_y }
                     self:_showHint(_("Drag the bar, lift to place it"))
                     return true
+                end
+                -- The ways back, shown in place of the line buttons.
+                if on_bar and (ges.ges == "tap" or is_double) and self._mini_choice_buttons then
+                    for _i, b in ipairs(self._mini_choice_buttons) do
+                        if self:_isTapOnMiniButton(ges.pos, b) then
+                            b.callback()
+                            return true
+                        end
+                    end
                 end
                 if on_bar and is_double then
                     for _i, b in pairs{ self._mini_sync_minus, self._mini_sync_plus,

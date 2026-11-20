@@ -4752,17 +4752,33 @@ end
 --- at once. Paused: play and go back to the read-along line / go back
 --- without playing / (page turns setting on) play from this page.
 --- Playing: go back to the playing line / pause.
+--- One of the ways back from a page that is not the narrated one:
+--- "page" play from this page, "mark" resume where it left off, "back" go
+--- back to the read-along line without changing play/pause.
+function Audiobook:_returnChoice(kind)
+    local ms = self.media_sync
+    if not ms then return end
+    logger.warn("Audiobook: return choice", kind)
+    if kind == "back" then
+        self._play_from_page = nil
+        self._readaloud_browsing_away = false
+        self:_hideReturnToReadAloudButton()
+        pcall(function() ms:refocusToCurrentSentence() end)
+    elseif kind == "page" or kind == "mark" then
+        if ms.state == ms.STATE.PAUSED then
+            self:_resumeFromPage(kind)
+        elseif kind == "mark" then
+            self:_returnChoice("back")
+        end
+    end
+end
+
 function Audiobook:_showReturnChoices()
     local ms = self.media_sync
     if not ms then return end
     local ButtonDialog = require("ui/widget/buttondialog")
     local dlg
-    local function go_back()
-        self._play_from_page = nil
-        self._readaloud_browsing_away = false
-        self:_hideReturnToReadAloudButton()
-        pcall(function() ms:refocusToCurrentSentence() end)
-    end
+    local function go_back() self:_returnChoice("back") end
     local function act(fn)
         return function()
             UIManager:close(dlg)

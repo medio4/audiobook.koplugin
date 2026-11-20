@@ -3238,6 +3238,13 @@ function MediaSync:showPlaybackBar()
             and self.plugin._showReturnChoices and function()
             pcall(self.plugin._showReturnChoices, self.plugin)
         end or nil,
+        -- The same choices as buttons in the large bar ("page", "mark",
+        -- "back").
+        on_return_choice_kind = self.overlay_mode and self.plugin
+            and self.plugin._returnChoice and function(kind)
+            local ok, err = pcall(self.plugin._returnChoice, self.plugin, kind)
+            if not ok then logger.warn("MediaSync: return choice failed:", err) end
+        end or nil,
         on_refocus = self.overlay_mode and function()
             if self.plugin then
                 self.plugin._readaloud_browsing_away = false
