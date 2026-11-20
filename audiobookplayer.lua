@@ -3495,8 +3495,15 @@ end
 --- shown, wrap its layout step so every page it lays out (submenus too)
 --- stops above the bar, then lay it out again.
 local function fitShownList(w)
-    if w._ab_fit_wrapped or type(w._recalculateDimen) ~= "function"
-            or not w.item_dimen or not w.updateItems then
+    if w._ab_fit_wrapped then return end
+    if type(w._recalculateDimen) ~= "function" or not w.item_dimen or not w.updateItems then
+        -- Diagnostic for lists this cannot fit (once per kind).
+        if w.item_table and UIManager._audiobook_unfit_logged ~= w.name then
+            UIManager._audiobook_unfit_logged = w.name
+            logger.warn("AudiobookPlayer: list not fitted:", w.name,
+                "recalc", type(w._recalculateDimen), "item_dimen", w.item_dimen ~= nil,
+                "updateItems", w.updateItems ~= nil)
+        end
         return
     end
     w._ab_fit_wrapped = true
@@ -3553,6 +3560,11 @@ local function installTopHook()
             if not ok then logger.warn("AudiobookPlayer: keep on top failed:", err) end
             ok, err = pcall(fitShownList, widget)
             if not ok then logger.warn("AudiobookPlayer: list fit failed:", err) end
+        elseif type(widget) == "table" and widget.item_table
+                and UIManager._audiobook_nobar_logged ~= widget.name then
+            -- Diagnostic: a list opened while no bar is registered on top.
+            UIManager._audiobook_nobar_logged = widget.name
+            logger.warn("AudiobookPlayer: list shown with no bar on top:", widget.name)
         end
         return r
     end
