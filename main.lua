@@ -4691,6 +4691,10 @@ end
 function Audiobook:onPageUpdate(cur_page, prev_page)
     if self._peeking_adjacent_page then return end
     self:_handlePageTurnFollow()
+    if self._readaloud_browsing_away then
+        local bar = self.media_sync and self.media_sync.playback_bar
+        if bar and bar.refreshBackArrow then pcall(bar.refreshBackArrow, bar) end
+    end
     -- TTS overlay boxes are screen coordinates.  A page turn must drop them
     -- or the underline is stamped at the old x,y on the new page.  Do not
     -- restart TTS here (that loop is why this used to be overlay-only).

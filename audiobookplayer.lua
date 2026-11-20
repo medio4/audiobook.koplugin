@@ -1876,6 +1876,37 @@ function AudiobookPlayer:_barOrder()
     return savedOrder(self.plugin, "bar_button_order", AudiobookPlayer.BAR_ITEMS)
 end
 
+--- "Back" with an arrow toward the line being read: right when it is
+--- further on in the book, left when it is earlier; mirrored for books
+--- whose pages turn the other way (inverse reading order).
+function AudiobookPlayer:_backLabel()
+    local ahead = true
+    local p = self.plugin
+    local ms = p and p.media_sync
+    local doc = p and p.ui and p.ui.document
+    pcall(function()
+        local line_page = ms and ms:_entryPage(ms:_skipBase())
+        local page = doc and doc:getCurrentPage()
+        if line_page and page then ahead = line_page >= page end
+    end)
+    local view = p and p.ui and p.ui.view
+    if view and view.inverse_reading_order then ahead = not ahead end
+    return ahead and (_("Back") .. " →") or ("← " .. _("Back"))
+end
+
+--- After a page turn while the ways back show: flip Back's arrow if the
+--- line being read is now on the other side.
+function AudiobookPlayer:refreshBackArrow()
+    if not self._mini_choice_buttons then return end
+    local want = self:_backLabel()
+    for _i, b in ipairs(self._mini_choice_buttons) do
+        if b.text and b.text:find(_("Back"), 1, true) and b.text ~= want then
+            self:_rebuildChoiceBar()
+            return
+        end
+    end
+end
+
 --- The saved order of the ways back (ids).
 function AudiobookPlayer:_choiceOrder()
     return savedOrder(self.plugin, "return_choice_order", AudiobookPlayer.CHOICE_ITEMS)
@@ -2021,7 +2052,7 @@ function AudiobookPlayer:_buildLargeMiniBar()
         -- Equal segments, each as wide as the longest one-line label.
         local specs
         if self.is_playing then
-            specs = { { "⏸ " .. _("Pause"), "pause" }, { "↩ " .. _("Back"), "back" } }
+            specs = { { "⏸ " .. _("Pause"), "pause" }, { self:_backLabel(), "back" } }
         else
             -- In the order chosen under Player bar > Arrange the choices.
             local by_kind = {}
@@ -2029,7 +2060,9 @@ function AudiobookPlayer:_buildLargeMiniBar()
             specs = {}
             for _i, id in ipairs(self:_choiceOrder()) do
                 local c = by_kind[id]
-                if c then table.insert(specs, { c.label(), id }) end
+                if c then
+                    table.insert(specs, { id == "back" and self:_backLabel() or c.label(), id })
+                end
             end
         end
         local seg_font = 15
