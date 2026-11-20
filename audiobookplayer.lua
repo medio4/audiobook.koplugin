@@ -1065,7 +1065,7 @@ function AudiobookPlayer:_dockedBarY()
     -- Above the status bar when it shows; at the very bottom, with a small
     -- margin, when it does not.
     local inset = self:_statusBarInset()
-    local gap = inset > 0 and 0 or Screen:scaleBySize(4)
+    local gap = inset > 0 and 0 or Screen:scaleBySize(1)
     return self.height - self._mini_height - inset - gap
 end
 
@@ -1088,7 +1088,7 @@ function AudiobookPlayer:_overMenuY()
         local y = math.floor(pct * self.height + 0.5)
         return math.max(0, math.min(y, self.height - self._mini_height))
     end
-    return self.height - self._mini_height - Screen:scaleBySize(4)
+    return self.height - self._mini_height - Screen:scaleBySize(1)
 end
 
 --- True when a menu, list or dialog lies between this bar and the book.
