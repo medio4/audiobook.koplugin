@@ -1545,6 +1545,11 @@ function AudiobookPlayer:setLoopActive(active)
 end
 
 function AudiobookPlayer:_buildOutputWidget(name)
+    -- The book title already shows in full at the top (two lines): do not
+    -- repeat it under the chapter name.
+    if name and self.title and name == self.title then
+        return VerticalSpan:new{ width = 0 }
+    end
     local max_w = self.width - Size.padding.small * 4
     local face = Font:getFace("cfont", 12)
     -- Simple word-wrap: split into up to 2 lines at word boundaries.
