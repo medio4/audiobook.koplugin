@@ -3600,6 +3600,30 @@ local function fitShownList(w)
     end
 end
 
+--- Sortable lists (KOReader's SortWidget; ZenOS shows its settings menus,
+--- the Read-Along menu among them, as one) count their rows from their
+--- own height, the whole screen. End the list at the bar and lay it out
+--- again: fewer rows per page, the rest on the next page. Their own
+--- re-layouts keep the shorter height.
+-- @treturn bool true if it changed the list
+local function fitSortList(w)
+    if type(w._populateItems) ~= "function" or not (w.dimen and w.dimen.h and w.item_height) then
+        return false
+    end
+    local ok, y = pcall(menuRoomAboveBar)
+    if not (ok and y) then return false end
+    local d = w.dimen
+    if (d.y or 0) + d.h <= y then return false end
+    local before = w.items_per_page
+    d.h = y - (d.y or 0)
+    w:_populateItems()
+    logger.warn("AudiobookPlayer: list ended at the bar:", w.name or w.title or "?",
+        "rows", before, "->", w.items_per_page)
+    -- The strip it gave up shows the book again.
+    UIManager:setDirty("all", "ui")
+    return true
+end
+
 --- Wrap UIManager.show / close, and wrap them again whenever something
 --- puts back an older copy (ZenOS swaps UIManager.show while it runs a
 --- KOReader menu item, then restores the one it saw first, which dropped
@@ -3632,6 +3656,8 @@ local function installTopHook()
             if not ok then logger.warn("AudiobookPlayer: keep on top failed:", err) end
             ok, err = pcall(fitShownList, widget)
             if not ok then logger.warn("AudiobookPlayer: list fit failed:", err) end
+            ok, err = pcall(fitSortList, widget)
+            if not ok then logger.warn("AudiobookPlayer: sort list fit failed:", err) end
         elseif type(widget) == "table" and widget.item_table
                 and UIManager._audiobook_nobar_logged ~= widget.name then
             -- Diagnostic: a list opened while no bar is registered on top.
@@ -4053,6 +4079,7 @@ function AudiobookPlayer:paintTo(bb, x, y)
                         local w = st[i].widget
                         parts[#parts + 1] = tostring(type(w) == "table" and (w.name or "?") or w)
                             .. (type(w) == "table" and w.item_table and "[list]" or "")
+                            .. (type(w) == "table" and type(w._populateItems) == "function" and "[sort]" or "")
                             .. (w == self and "[bar]" or "")
                     end
                     local ok_y, y = pcall(menuRoomAboveBar)
@@ -4065,6 +4092,10 @@ function AudiobookPlayer:paintTo(bb, x, y)
                     if type(w) == "table" and w ~= self and w.item_table then
                         local ok, err = pcall(fitShownList, w)
                         if not ok then logger.warn("AudiobookPlayer: list fit failed:", err) end
+                    end
+                    if type(w) == "table" and w ~= self then
+                        local ok, err = pcall(fitSortList, w)
+                        if not ok then logger.warn("AudiobookPlayer: sort list fit failed:", err) end
                     end
                 end
             end)
