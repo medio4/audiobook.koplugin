@@ -33,9 +33,9 @@ end
 local Device, UIManager, InfoMessage, T, Time
 local BtUI, BtMediaControl, BugReport, BenchmarkRunner, MenuBuilder, Utils, Updater
 local SessionRecorder
--- Seconds to start before a line when playing from it (headphones miss the
+-- How far to start before a line when playing from it (headphones miss the
 -- first moment of a new stream).
-local LINE_START_LEAD_S = 0.6
+local LINE_START_LEAD_MS = 600 -- default; setting line_start_lead_ms
 local PLUGIN_PATH
 
 -- Floating player (setting floating_player): a read-along that keeps
@@ -910,6 +910,33 @@ function Audiobook:addToMainMenu(menu_items)
                             self:toggleSetting("hold_word_plays_audio", false)
                         end,
                         help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default.\n\nTo use another gesture instead, leave this off and bind \"Play audiobook from here\" in Settings > Taps and gestures > Gesture manager."),
+                    },
+                    {
+                        text_func = function()
+                            local ms = self:getSetting("line_start_lead_ms", LINE_START_LEAD_MS)
+                            return T(_("Start before a line: %1 s"), string.format("%.1f", ms / 1000))
+                        end,
+                        keep_menu_open = true,
+                        callback = function(touchmenu_instance)
+                            local SpinWidget = require("ui/widget/spinwidget")
+                            UIManager:show(SpinWidget:new{
+                                title_text = _("Start before a line"),
+                                info_text = _("When you play from a line (Play from here, hold a word, play from this page), the audio starts this much before its first word, so the word is not cut off. Raise it if the first word is clipped; lower it if you hear the end of the line before."),
+                                value = self:getSetting("line_start_lead_ms", LINE_START_LEAD_MS) / 1000,
+                                value_min = 0,
+                                value_max = 3,
+                                value_step = 0.1,
+                                value_hold_step = 0.5,
+                                precision = "%.1f",
+                                default_value = LINE_START_LEAD_MS / 1000,
+                                ok_text = _("Set"),
+                                callback = function(spin)
+                                    self:setSetting("line_start_lead_ms", math.floor(spin.value * 1000 + 0.5))
+                                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                                end,
+                            })
+                        end,
+                        help_text = _("How far before a line playback starts when you play from it, so its first word is not cut off. Default 0.6 s."),
                     },
                     {
                         text_func = function()
@@ -2842,7 +2869,8 @@ function Audiobook:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, op
             -- of a new stream, so begin a little before.
             if start_time and chosen_entry.end_time then
                 local off = (tonumber(self.getSyncOffsetMs and self:getSyncOffsetMs()) or 0) / 1000
-                start_time = math.max(0, start_time + off - LINE_START_LEAD_S)
+                start_time = math.max(0, start_time + off
+                    - (tonumber(self:getSetting("line_start_lead_ms", LINE_START_LEAD_MS)) or LINE_START_LEAD_MS) / 1000)
                 line_start_entry = chosen_entry
             end
             -- Make "Continue listening" pick up a "Play from here" start so
