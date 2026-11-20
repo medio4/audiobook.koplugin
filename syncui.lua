@@ -125,7 +125,7 @@ local function showTag(plugin, delta_ms, total_ms)
     UIManager:scheduleIn(SyncUI.FEEDBACK_S, tag.timer)
 end
 
---- Outline style and word lighting for a few seconds, then back.
+--- Outline style for a few seconds, then back.
 local function startAdjustLook(plugin)
     local ms = plugin.media_sync
     local hm = ms and ms.highlight_manager
@@ -135,14 +135,11 @@ local function startAdjustLook(plugin)
     end
     local st = plugin._sync_adjust
     hm.current_style = hm.STYLES and hm.STYLES.BOX or "box"
-    hm.force_words_until = os.time() + SyncUI.FEEDBACK_S
     if st.timer then UIManager:unschedule(st.timer) end
     st.timer = function()
         if plugin._sync_adjust ~= st then return end
         plugin._sync_adjust = nil
         hm.current_style = st.style
-        hm.force_words_until = nil
-        pcall(function() hm:clearWordHighlight() end)
         -- Repaint the sentence in its own style.
         if ms and ms._highlighted_sentence_idx then ms._highlighted_sentence_idx = nil end
     end
@@ -151,9 +148,43 @@ local function startAdjustLook(plugin)
     if ms then ms._highlighted_sentence_idx = nil end
 end
 
+--- Light the spoken word inside the highlight for a few seconds, so the
+--- reader can hear and see whether they now line up. Books without word
+--- timings get estimated ones (MediaSync:_estimatedWords). Only the word's
+--- own box is refreshed as it moves, so this stays cheap on e-ink.
+local function startWordLight(plugin)
+    local ms = plugin.media_sync
+    local hm = ms and ms.highlight_manager
+    if not hm then return end
+    local st = plugin._sync_words
+    if st and st.timer then UIManager:unschedule(st.timer) end
+    st = {}
+    plugin._sync_words = st
+    hm.force_words_until = os.time() + SyncUI.FEEDBACK_S
+    -- Light the current word on the next sync tick instead of waiting for
+    -- the next word to start, and match it from the line's start again
+    -- (an earlier shift moves back in the line).
+    ms._current_word_idx = 0
+    hm._word_scan = nil
+    st.timer = function()
+        if plugin._sync_words ~= st then return end
+        plugin._sync_words = nil
+        -- Cleared before the box, so no sync tick can light it again.
+        hm.force_words_until = nil
+        -- With word highlighting on anyway, the box stays.
+        local always = plugin.getSetting and plugin:getSetting("highlight_words", false) == true
+        if not always then
+            pcall(function() hm:clearWordHighlight() end)
+        end
+    end
+    UIManager:scheduleIn(SyncUI.FEEDBACK_S, st.timer)
+end
+
 --- Called after the offset changed by delta_ms (now total_ms).
 function SyncUI.afterChange(plugin, delta_ms, total_ms)
     pcall(startAdjustLook, plugin)
+    local okw, errw = pcall(startWordLight, plugin)
+    if not okw then logger.warn("SyncUI: word light failed:", errw) end
     local ok, err = pcall(showTag, plugin, delta_ms, total_ms)
     if not ok then logger.warn("SyncUI: tag failed:", err) end
 end
