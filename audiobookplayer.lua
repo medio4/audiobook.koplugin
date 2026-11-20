@@ -2457,10 +2457,21 @@ function AudiobookPlayer:handleEvent(event)
                 self._moving = nil
                 self:_closeHint()
             end
+            -- A hold that started on the bar is ours up to the lift, even if
+            -- the finger drifts off it: passed below, the hold selected the
+            -- nearest word and the lift opened a dictionary lookup.
+            if ges and self._hold_on_bar
+                    and (ges.ges == "hold_pan" or ges.ges == "hold_release") then
+                if ges.ges == "hold_release" then self._hold_on_bar = nil end
+                return true
+            end
             if ges and ges.pos then
                 local mini_y = self:_miniBarY()
                 local on_bar = ges.pos.y >= mini_y
                     and ges.pos.y < mini_y + self._mini_height
+                if ges.ges == "hold" then
+                    self._hold_on_bar = on_bar or nil
+                end
                 -- With double tap enabled in the reader, two quick taps arrive
                 -- as one double_tap; count it as two presses of a sync
                 -- button and as one press of anything else, never as a
@@ -2594,6 +2605,9 @@ function AudiobookPlayer:handleEvent(event)
                     end
                     return true
                 end
+                -- Any other hold on the bar stops here: below the bar it
+                -- would select a word of the book.
+                if on_bar and ges.ges == "hold" then return true end
                 -- Gesture outside mini bar (or non-tap on bar) -> deliver
                 -- below the bar, interleaved widgets first (see helper).
                 return self:_dispatchGestureBelow(event)
@@ -2631,7 +2645,9 @@ function AudiobookPlayer:handleEvent(event)
                     return true
                 end
             end
-            return false
+            -- The full player covers the page: a hold must not reach the
+            -- book underneath (it selected a word there).
+            return true
         end
         if ges.ges == "swipe" and self._scrubber_dragging then
             -- Gesture detector sometimes emits swipe instead of pan_release.
