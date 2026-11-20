@@ -591,19 +591,9 @@ function Audiobook:addToMainMenu(menu_items)
         text = _("Audiobook Read-Along"),
         sorting_hint = "tools",
         sub_item_table = {
-            -- ── TTS read-along (document required) ──
+            -- ── Play ──
             {
-                text = _("Start Text-to-Speech from current page"),
-                enabled_func = function() return (self.ui and self.ui.document) or false end,
-                callback = function(touchmenu_instance)
-                    if touchmenu_instance then touchmenu_instance:closeMenu() end
-                    if not self._init_ok then self:_showInitError(); return end
-                    self:startReadAlong()
-                end,
-            },
-            -- ── Media playback (audio files & EPUB overlays) ──
-            {
-                text = _("Play aligned/enriched audiobook"),
+                text = _("Play audiobook"),
                 enabled_func = function()
                     return (self._init_ok and self.media_sync ~= nil
                             and ((self.ui and self.ui.document) or self:_isFileManager())) or false
@@ -614,42 +604,407 @@ function Audiobook:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Start music playlist"),
-                enabled_func = function()
-                    return (self._init_ok and self.media_sync ~= nil) or false
-                end,
+                text = _("Read aloud (text-to-speech) from this page"),
+                enabled_func = function() return (self.ui and self.ui.document) or false end,
                 callback = function(touchmenu_instance)
                     if touchmenu_instance then touchmenu_instance:closeMenu() end
-                    self:openMusicPlaylist()
+                    if not self._init_ok then self:_showInitError(); return end
+                    self:startReadAlong()
                 end,
             },
+            -- ── Other audio ──
             {
-                text = _("Play unaligned audiobook"),
-                enabled_func = function()
-                    return (self._init_ok and self.media_sync ~= nil) or false
-                end,
-                callback = function(touchmenu_instance)
-                    if touchmenu_instance then touchmenu_instance:closeMenu() end
-                    self:openAudioFile()
-                end,
+                text = _("Other audio"),
+                sub_item_table = {
+                    {
+                        text = _("Play unaligned audiobook"),
+                        enabled_func = function()
+                            return (self._init_ok and self.media_sync ~= nil) or false
+                        end,
+                        callback = function(touchmenu_instance)
+                            if touchmenu_instance then touchmenu_instance:closeMenu() end
+                            self:openAudioFile()
+                        end,
+                    },
+                    {
+                        text = _("Start music playlist"),
+                        enabled_func = function()
+                            return (self._init_ok and self.media_sync ~= nil) or false
+                        end,
+                        callback = function(touchmenu_instance)
+                            if touchmenu_instance then touchmenu_instance:closeMenu() end
+                            self:openMusicPlaylist()
+                        end,
+                    },
+                    -- ── Audiobookshelf ──
+                    -- Configuration/log-in should be reachable even if the media
+                    -- player failed to initialize on a particular firmware.  Playback
+                    -- actions inside the submenu still guard against a missing
+                    -- media_sync.
+                    {
+                        text = _("Audiobookshelf"),
+                        enabled_func = function()
+                            return self._init_ok
+                        end,
+                        sub_item_table_func = function()
+                            return self:_buildAudiobookshelfMenu()
+                        end,
+                    },
+                },
             },
-            -- ── Audiobookshelf ──
-            -- Configuration/log-in should be reachable even if the media
-            -- player failed to initialize on a particular firmware.  Playback
-            -- actions inside the submenu still guard against a missing
-            -- media_sync.
+            -- ── Reading & sync ──
             {
-                text = _("Audiobookshelf"),
-                enabled_func = function()
-                    return self._init_ok
-                end,
-                sub_item_table_func = function()
-                    return self:_buildAudiobookshelfMenu()
-                end,
+                text = _("Reading & sync"),
+                sub_item_table = {
+                    {
+                        text = _("Follow narration page (aligned)"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("media_follow_page_turn", true)
+                        end,
+                        callback = function()
+                            self:toggleSetting("media_follow_page_turn", true)
+                        end,
+                        help_text = _("When enabled (default), the book view auto-turns to keep the current narration sentence on screen while you stay with the read-aloud. Manually turning a page never seeks or restarts audio: highlighting pauses and a “Return to read-aloud” cue appears until you jump back or the narration catches up."),
+                    },
+                    {
+                        text = _("Page turns move the audiobook"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("page_turn_skips_audio", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("page_turn_skips_audio", false)
+                        end,
+                        help_text = _("For books with a built-in audiobook, while it plays: turning to a later page than the one being read moves the audio to the first line of the new page. Turning back pauses it; Play then starts from the first line of the page you are on, or where the audiobook left off (see the next setting). Off by default."),
+                    },
+                    {
+                        text_func = function()
+                            local v = self:getSetting("back_turn_play_from", nil)
+                            local label = (v == "page" and _("this page"))
+                                or (v == "mark" and _("where it left off"))
+                                or _("ask")
+                            return T(_("After turning back, Play starts from: %1"), label)
+                        end,
+                        enabled_func = function()
+                            return self:getSetting("page_turn_skips_audio", false) and true or false
+                        end,
+                        sub_item_table = {
+                            {
+                                text = _("This page"),
+                                checked_func = function() return self:getSetting("back_turn_play_from", nil) == "page" end,
+                                callback = function() self:setSetting("back_turn_play_from", "page") end,
+                            },
+                            {
+                                text = _("Where the audiobook left off"),
+                                checked_func = function() return self:getSetting("back_turn_play_from", nil) == "mark" end,
+                                callback = function() self:setSetting("back_turn_play_from", "mark") end,
+                            },
+                            {
+                                text = _("Ask next time"),
+                                checked_func = function()
+                                    local v = self:getSetting("back_turn_play_from", nil)
+                                    return v ~= "page" and v ~= "mark"
+                                end,
+                                callback = function() self:setSetting("back_turn_play_from", "ask") end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("Hold a word to play from there"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("hold_word_plays_audio", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("hold_word_plays_audio", false)
+                        end,
+                        help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default."),
+                    },
+                    {
+                        text = _("Auto-advance pages"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("auto_advance", true)
+                        end,
+                        callback = function()
+                            self:toggleSetting("auto_advance", true)
+                        end,
+                    },
+                    {
+                        text = _("Pause reading when a menu opens"),
+                        checked_func = function()
+                            return self:getSetting("pause_on_menu", true)
+                        end,
+                        callback = function()
+                            self:toggleSetting("pause_on_menu", true)
+                        end,
+                        help_text = _("When enabled (default), read-aloud pauses while a KOReader menu or dialog is open and resumes when it closes. When disabled, narration keeps playing while you browse menus; only the sentence highlighting pauses."),
+                    },
+                    {
+                        text_func = function()
+                            local off = self:getSetting("smil_sync_offset_ms", 0)
+                            return T(_("Overlay sync offset: %1 s"), string.format("%+.1f", off / 1000))
+                        end,
+                        keep_menu_open = true,
+                        callback = function(touchmenu_instance)
+                            local SpinWidget = require("ui/widget/spinwidget")
+                            local cur = self:getSetting("smil_sync_offset_ms", 0)
+                            UIManager:show(SpinWidget:new{
+                                title_text = _("Overlay sync offset"),
+                                info_text = _("Positive values delay the highlight (use when the highlight runs ahead of the narration); negative values advance it."),
+                                value = cur / 1000,
+                                value_min = -60,
+                                value_max = 60,
+                                value_step = 0.5,
+                                value_hold_step = 5,
+                                precision = "%.1f",
+                                ok_text = _("Set"),
+                                callback = function(spin)
+                                    self:setSetting("smil_sync_offset_ms", math.floor(spin.value * 1000))
+                                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                                end,
+                            })
+                        end,
+                        help_text = _("Shifts EPUB Media Overlay sentence highlighting relative to the audio. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio."),
+                    },
+                },
+            },
+            -- ── Highlighting ──
+            {
+                text = _("Highlighting"),
+                sub_item_table = {
+                    {
+                        text = _("Highlight sentences"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("highlight_sentences", true)
+                        end,
+                        callback = function()
+                            self:toggleSetting("highlight_sentences", true)
+                        end,
+                    },
+                    {
+                        text = _("Highlight words"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("highlight_words", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("highlight_words", false)
+                            -- A word box may be on screen right now; drop it
+                            -- so switching off takes effect immediately
+                            -- instead of at the next sentence.
+                            if not self:getSetting("highlight_words", false)
+                                    and self.highlight_manager then
+                                pcall(function()
+                                    self.highlight_manager:clearWordHighlight()
+                                end)
+                            end
+                        end,
+                        help_text = _("Paint the word being narrated as a moving highlight inside the sentence highlight. Off by default: word highlighting needs one e-ink refresh per spoken word, and on slower devices those refreshes can skip words or flash, so sentence-only highlighting reads better there. The current word still appears as text in the read-along bar."),
+                    },
+                    {
+                        text_func = function()
+                            local styles = {
+                                background = _("Background"),
+                                underline = _("Underline"),
+                                box = _("Box"),
+                                invert = _("Invert"),
+                            }
+                            return T(_("Highlight style: %1"), styles[self:getSetting("highlight_style", "background")] or _("Background"))
+                        end,
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        sub_item_table_func = function()
+                            return MenuBuilder.buildHighlightStyleMenu(self)
+                        end,
+                    },
+                    {
+                        text = _("Group short cues (e-ink)"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("highlight_group_cues", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("highlight_group_cues", false)
+                        end,
+                        help_text = _("For EPUB Media Overlay read-aloud books: merge consecutive short phrases into one highlight that stays on screen at least half a second, so slow e-ink refreshes are not skipped between words. Audio is unaffected. Takes effect on the next audio part or after restarting read-aloud."),
+                    },
+                },
+            },
+            -- ── Player bar ──
+            {
+                text = _("Player bar"),
+                sub_item_table = {
+                    {
+                        text = _("Keep the audiobook bar"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("keep_media_overlay_bar", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("keep_media_overlay_bar", false)
+                            local now = self:getSetting("keep_media_overlay_bar", false)
+                            local ms = self.media_sync
+                            if not ms then return end
+                            if now then
+                                if self:_hasMediaOverlays() then
+                                    pcall(function() ms:pinOverlayChrome() end)
+                                end
+                            else
+                                pcall(function()
+                                    if ms.playback_bar then
+                                        ms.playback_bar:hide()
+                                        ms.playback_bar = nil
+                                    end
+                                    ms:_releaseMiniBarSpace()
+                                end)
+                            end
+                        end,
+                        help_text = _("When enabled, the mini audiobook bar stays on screen after you stop narration. When disabled (default), the bar hides when idle."),
+                    },
+                    {
+                        text = _("Large player bar"),
+                        checked_func = function()
+                            return self:getSetting("large_mini_bar", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("large_mini_bar", false)
+                        end,
+                        help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
+                    },
+                    {
+                        text = _("Floating player"),
+                        sub_item_table = {
+                            {
+                                text = _("Enable"),
+                                checked_func = function()
+                                    return self:getSetting("floating_enabled", true)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("floating_enabled", true)
+                                end,
+                                help_text = _("Turns both kinds of floating player below on or off. On by default."),
+                                separator = true,
+                            },
+                            {
+                                text = _("Appear when leaving the book"),
+                                enabled_func = function()
+                                    return self:getSetting("floating_enabled", true)
+                                end,
+                                checked_func = function()
+                                    return self:getSetting("floating_player", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("floating_player", false)
+                                end,
+                                help_text = _("Keep a read-along playing when you leave its book (Home, or opening the library). A small player floats at the bottom of the library and other screens; tap it for line skip, open the book, stop or hide. Reopening the book takes the narration back into the page. Off by default."),
+                            },
+                            {
+                                text = _("Appear over in-book menus"),
+                                enabled_func = function()
+                                    return self:getSetting("floating_enabled", true)
+                                end,
+                                checked_func = function()
+                                    return self:getSetting("bar_over_menus", true)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("bar_over_menus", true)
+                                end,
+                                help_text = _("Keep the player bar on top of menus, lists and dialogs opened from the book. While one is open, hold an empty part of the bar and drag it to move it out of the way; it keeps that spot for menus and goes back to its place on the page. On by default."),
+                                separator = true,
+                            },
+                            {
+                                text = _("Show the floating player"),
+                                enabled_func = function() return detachedAlive() ~= nil end,
+                                callback = function() Audiobook._showFloating(true) end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("Hide control bar while playing (experimental)"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("playback_bar_visibility", "always") == "paused_only"
+                        end,
+                        callback = function()
+                            local cur = self:getSetting("playback_bar_visibility", "always")
+                            local new_val = (cur == "paused_only") and "always" or "paused_only"
+                            self:setSetting("playback_bar_visibility", new_val)
+                            if self.sync_controller and self.sync_controller._applyBarVisibility then
+                                self.sync_controller:_applyBarVisibility()
+                            end
+                        end,
+                        help_text = _("Experimental: when enabled, the playback control bar disappears while TTS is playing so the bottom of the page is fully visible for read-along. Pause playback (via tap-to-pause overlay or BT headset button) to bring the bar back."),
+                    },
+                    {
+                        text = _("Hide progress bar during read-along"),
+                        checked_func = function()
+                            return self:getSetting("hide_tts_progress_bar", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("hide_tts_progress_bar", false)
+                            -- Rebuild the bar so the change is visible right
+                            -- away rather than at the next start.
+                            local sc = self.sync_controller
+                            if sc and sc.playback_bar then
+                                sc:showPlaybackBar()
+                                if sc.playback_bar and sc.isPlaying then
+                                    sc.playback_bar:updatePlayState(sc:isPlaying())
+                                end
+                            end
+                        end,
+                        help_text = _("When enabled, the progress bar row is left out of the control bar during TTS read-along, making the bar one row shorter and leaving more of the page visible. The sentence highlight already shows how far along the page you are. The progress bar is always shown for audiobook playback, where it doubles as the seek control."),
+                    },
+                    {
+                        text = _("Keep status bars during read-aloud"),
+                        enabled_func = function() return (self.ui and self.ui.document) or false end,
+                        checked_func = function()
+                            return self:getSetting("keep_reader_status_bars", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("keep_reader_status_bars", false)
+                        end,
+                        help_text = _("When enabled, the minimized read-aloud mini player sits above KOReader’s bottom status bar / progress bar (alt status bar at the top is unchanged). The page always reflows so book text ends above the mini player — the player never covers readable text. When disabled (default), the mini player sits at the bottom of the screen (may cover the status bar) but text is still reflowed above it."),
+                    },
+                    {
+                        text = _("Lock KOReader page margins"),
+                        enabled_func = function()
+                            return (self.ui and self.ui.document) and true or false
+                        end,
+                        checked_func = function()
+                            return self:getSetting("lock_koreader_page_margins", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("lock_koreader_page_margins", false)
+                            local now = self:getSetting("lock_koreader_page_margins", false)
+                            local ms = self.media_sync
+                            if not ms then return end
+                            if now then
+                                if self:_hasMediaOverlays() then
+                                    pcall(function() ms:pinOverlayChrome() end)
+                                end
+                            else
+                                pcall(function() ms:_releaseMiniBarSpace() end)
+                            end
+                        end,
+                        help_text = _("When enabled, the plugin writes this book’s bottom page margin into KOReader’s own settings before CRE typesets. The next open rebuilds the layout once (text stays above the audiobook bar); after that, KOReader reuses that layout, so starting a read-along no longer re-lays out the page. Works with or without the persistent bar. Disable to restore your original margins and edit them with KOReader’s usual controls."),
+                    },
+                    {
+                        text = _("Line-by-line view in the full-screen player"),
+                        checked_func = function()
+                            return self:getSetting("player_line_view", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("player_line_view", false)
+                        end,
+                        help_text = _("EPUB read-along: the full-screen player shows the previous, current and next sentence in place of the cover, with sync adjusters below. Applies the next time playback starts."),
+                    },
+                },
             },
             -- ── Bluetooth settings ──
             {
-                text = _("Bluetooth settings"),
+                text = _("Bluetooth & headset"),
                 sub_item_table = {
                     {
                         text_func = function()
@@ -748,390 +1103,10 @@ function Audiobook:addToMainMenu(menu_items)
                     return MenuBuilder.buildVoiceSettingsMenu(self)
                 end,
             },
-            -- ── General settings ──
+            -- ── Sleep & lid ──
             {
-                text = _("General settings"),
+                text = _("Sleep & lid"),
                 sub_item_table = {
-                    {
-                        text = _("Session recorder settings"),
-                        sub_item_table = {
-                            {
-                                text_func = function()
-                                    local fps = self:getSetting("session_recorder_video_fps", 1)
-                                    return T(_("Video FPS: %1"), fps)
-                                end,
-                                sub_item_table = {
-                                    { text = "1", checked_func = function() return self:getSetting("session_recorder_video_fps", 1) == 1 end, callback = function() self:setSetting("session_recorder_video_fps", 1) end },
-                                    { text = "2", checked_func = function() return self:getSetting("session_recorder_video_fps", 1) == 2 end, callback = function() self:setSetting("session_recorder_video_fps", 2) end },
-                                    { text = "5", checked_func = function() return self:getSetting("session_recorder_video_fps", 1) == 5 end, callback = function() self:setSetting("session_recorder_video_fps", 5) end },
-                                },
-                                help_text = _("Frames per second for the video capture. Higher values use more CPU and storage."),
-                            },
-                            {
-                                text_func = function()
-                                    local scale = self:getSetting("session_recorder_video_scale", 0.5)
-                                    return T(_("Video scale: %1"), scale)
-                                end,
-                                sub_item_table = {
-                                    { text = "25%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 0.25 end, callback = function() self:setSetting("session_recorder_video_scale", 0.25) end },
-                                    { text = "50%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 0.5 end, callback = function() self:setSetting("session_recorder_video_scale", 0.5) end },
-                                    { text = "75%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 0.75 end, callback = function() self:setSetting("session_recorder_video_scale", 0.75) end },
-                                    { text = "100%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 1.0 end, callback = function() self:setSetting("session_recorder_video_scale", 1.0) end },
-                                },
-                                help_text = _("Resolution scaling for the video. Lower values reduce file size and CPU load."),
-                            },
-                            {
-                                text_func = function()
-                                    local q = self:getSetting("session_recorder_video_quality", 8)
-                                    return T(_("Video quality: %1"), q)
-                                end,
-                                sub_item_table = {
-                                    { text = "4", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 4 end, callback = function() self:setSetting("session_recorder_video_quality", 4) end },
-                                    { text = "8", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 8 end, callback = function() self:setSetting("session_recorder_video_quality", 8) end },
-                                    { text = "12", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 12 end, callback = function() self:setSetting("session_recorder_video_quality", 12) end },
-                                    { text = "16", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 16 end, callback = function() self:setSetting("session_recorder_video_quality", 16) end },
-                                    { text = "24", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 24 end, callback = function() self:setSetting("session_recorder_video_quality", 24) end },
-                                },
-                                help_text = _("MJPEG quality (2 = best, 31 = worst). Lower values produce larger files."),
-                            },
-                            {
-                                text = _("Include audio in video file"),
-                                enabled_func = function()
-                                    return false
-                                end,
-                                checked_func = function()
-                                    return self:getSetting("session_recorder_video_include_audio", false)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("session_recorder_video_include_audio", false)
-                                end,
-                                help_text = _("When enabled, the recorder tries to mux ALSA audio into the video file in real time. This requires a working ALSA capture device and fails on most e-ink devices, so it is disabled."),
-                            },
-                            {
-                                text = _("Save separate audio files"),
-                                checked_func = function()
-                                    return self:getSetting("session_recorder_save_separate_audio", true)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("session_recorder_save_separate_audio", true)
-                                end,
-                                help_text = _("When enabled, TTS and playback audio are saved as WAV files in the audio/ folder. When disabled, only the video file is kept."),
-                            },
-                            {
-                                text_func = function()
-                                    local max_s = self:getSetting("session_recorder_max_interval_s", 5)
-                                    return T(_("Screenshot max interval: %1s"), max_s)
-                                end,
-                                sub_item_table = {
-                                    { text = "5s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 5 end, callback = function() self:setSetting("session_recorder_max_interval_s", 5) end },
-                                    { text = "10s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 10 end, callback = function() self:setSetting("session_recorder_max_interval_s", 10) end },
-                                    { text = "30s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 30 end, callback = function() self:setSetting("session_recorder_max_interval_s", 30) end },
-                                    { text = "60s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 60 end, callback = function() self:setSetting("session_recorder_max_interval_s", 60) end },
-                                },
-                                help_text = _("Maximum time between forced screenshot frames when the screen is static."),
-                            },
-                        },
-                    },
-                    {
-                        text_func = function()
-                            if not self._init_ok or not self.tts_engine or not self.tts_engine._wav_play_bin then
-                                return _("Audio output (PocketBook): N/A")
-                            end
-                            local pb_default = self.tts_engine._pb_has_tts_sm and "tts_sm" or ""
-                            local dev = self:getSetting("pb_alsa_device", pb_default)
-                            local labels = {
-                                ["tts_sm"] = _("PocketBook pipeline"),
-                                [""] = _("Auto"),
-                            }
-                            return T(_("Audio output (PocketBook): %1"), labels[dev] or dev)
-                        end,
-                        sub_item_table_func = function()
-                            return MenuBuilder.buildAlsaDeviceMenu(self)
-                        end,
-                        enabled_func = function()
-                            return (self._init_ok and self.tts_engine and self.tts_engine._wav_play_bin ~= nil) or false
-                        end,
-                        help_text = _("PocketBook devices route audio through different paths depending on firmware. The default works on most devices. Change this only if you hear no sound, distorted sound, or playback at 2-3x speed (known issue on PB631). Each option in the submenu has its own help text describing what to try."),
-                    },
-                    {
-                        text = _("Allow speaker playback without Bluetooth"),
-                        checked_func = function()
-                            return self:getSetting("pb_speaker_without_bt", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("pb_speaker_without_bt", false)
-                        end,
-                        enabled_func = function()
-                            return (self._init_ok and self.tts_engine and self.tts_engine._wav_play_bin ~= nil) or false
-                        end,
-                        help_text = _("By default, PocketBooks with a Bluetooth adapter only play through Bluetooth audio, because direct hardware access can damage the amplifier. This toggle lifts the Bluetooth requirement ONLY for daemon-routed devices (tts_sm, hwout_mix), which go through the PocketBook audio daemon like the system's own TTS and never touch the hardware directly. Direct-hardware choices (plughw:0) remain blocked without Bluetooth. Use at your own risk."),
-                    },
-                    {
-                        text_func = function()
-                            if self.tts_engine and self.tts_engine._android_pcm_auto then
-                                return _("Android: persistent audio stream (auto-enabled)")
-                            end
-                            return _("Android: persistent audio stream")
-                        end,
-                        checked_func = function()
-                            return self:getSetting("android_pcm_stream", false)
-                                or (self.tts_engine and self.tts_engine._android_pcm_auto) or false
-                        end,
-                        callback = function()
-                            self:toggleSetting("android_pcm_stream", false)
-                        end,
-                        enabled_func = function()
-                            return (Device.isAndroid and Device:isAndroid()) or false
-                        end,
-                        help_text = _("Workaround for Android devices where read-aloud audio cuts off mid-sentence and stalls (seen on some MTK e-readers). Plays synthesized audio through one persistent, continuously-fed audio track instead of a fresh media player per sentence. Leave this off for neural engines such as SherpaTTS: the persistent stream adds hiss and pitch artifacts. Off by default; the plugin also switches to it automatically for the rest of the session when it detects a stalled clip, except on neural engines. Takes effect from the next sentence."),
-                    },
-                    {
-                        text = _("Keep playing when lid is closed"),
-                        checked_func = function()
-                            return self:getSetting("keep_playing_on_lid_close", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("keep_playing_on_lid_close", false)
-                        end,
-                        help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake while something is playing and suspends on its own within 30 seconds once playback stops or pauses. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
-                    },
-                    {
-                        text = _("Pause reading when a menu opens"),
-                        checked_func = function()
-                            return self:getSetting("pause_on_menu", true)
-                        end,
-                        callback = function()
-                            self:toggleSetting("pause_on_menu", true)
-                        end,
-                        help_text = _("When enabled (default), read-aloud pauses while a KOReader menu or dialog is open and resumes when it closes. When disabled, narration keeps playing while you browse menus; only the sentence highlighting pauses."),
-                    },
-                    {
-                        text = _("Hide control bar while playing (experimental)"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("playback_bar_visibility", "always") == "paused_only"
-                        end,
-                        callback = function()
-                            local cur = self:getSetting("playback_bar_visibility", "always")
-                            local new_val = (cur == "paused_only") and "always" or "paused_only"
-                            self:setSetting("playback_bar_visibility", new_val)
-                            if self.sync_controller and self.sync_controller._applyBarVisibility then
-                                self.sync_controller:_applyBarVisibility()
-                            end
-                        end,
-                        help_text = _("Experimental: when enabled, the playback control bar disappears while TTS is playing so the bottom of the page is fully visible for read-along. Pause playback (via tap-to-pause overlay or BT headset button) to bring the bar back."),
-                    },
-                    {
-                        text = _("Hide progress bar during read-along"),
-                        checked_func = function()
-                            return self:getSetting("hide_tts_progress_bar", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("hide_tts_progress_bar", false)
-                            -- Rebuild the bar so the change is visible right
-                            -- away rather than at the next start.
-                            local sc = self.sync_controller
-                            if sc and sc.playback_bar then
-                                sc:showPlaybackBar()
-                                if sc.playback_bar and sc.isPlaying then
-                                    sc.playback_bar:updatePlayState(sc:isPlaying())
-                                end
-                            end
-                        end,
-                        help_text = _("When enabled, the progress bar row is left out of the control bar during TTS read-along, making the bar one row shorter and leaving more of the page visible. The sentence highlight already shows how far along the page you are. The progress bar is always shown for audiobook playback, where it doubles as the seek control."),
-                    },
-                    {
-                        text_func = function()
-                            local styles = {
-                                background = _("Background"),
-                                underline = _("Underline"),
-                                box = _("Box"),
-                                invert = _("Invert"),
-                            }
-                            return T(_("Highlight style: %1"), styles[self:getSetting("highlight_style", "background")] or _("Background"))
-                        end,
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        sub_item_table_func = function()
-                            return MenuBuilder.buildHighlightStyleMenu(self)
-                        end,
-                    },
-                    {
-                        text = _("Auto-advance pages"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("auto_advance", true)
-                        end,
-                        callback = function()
-                            self:toggleSetting("auto_advance", true)
-                        end,
-                    },
-                    {
-                        text = _("Highlight sentences"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("highlight_sentences", true)
-                        end,
-                        callback = function()
-                            self:toggleSetting("highlight_sentences", true)
-                        end,
-                    },
-                    {
-                        text = _("Highlight words"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("highlight_words", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("highlight_words", false)
-                            -- A word box may be on screen right now; drop it
-                            -- so switching off takes effect immediately
-                            -- instead of at the next sentence.
-                            if not self:getSetting("highlight_words", false)
-                                    and self.highlight_manager then
-                                pcall(function()
-                                    self.highlight_manager:clearWordHighlight()
-                                end)
-                            end
-                        end,
-                        help_text = _("Paint the word being narrated as a moving highlight inside the sentence highlight. Off by default: word highlighting needs one e-ink refresh per spoken word, and on slower devices those refreshes can skip words or flash, so sentence-only highlighting reads better there. The current word still appears as text in the read-along bar."),
-                    },
-                    {
-                        text = _("Group short cues (e-ink)"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("highlight_group_cues", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("highlight_group_cues", false)
-                        end,
-                        help_text = _("For EPUB Media Overlay read-aloud books: merge consecutive short phrases into one highlight that stays on screen at least half a second, so slow e-ink refreshes are not skipped between words. Audio is unaffected. Takes effect on the next audio part or after restarting read-aloud."),
-                    },
-                    {
-                        text = _("Follow narration page (aligned)"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("media_follow_page_turn", true)
-                        end,
-                        callback = function()
-                            self:toggleSetting("media_follow_page_turn", true)
-                        end,
-                        help_text = _("When enabled (default), the book view auto-turns to keep the current narration sentence on screen while you stay with the read-aloud. Manually turning a page never seeks or restarts audio: highlighting pauses and a “Return to read-aloud” cue appears until you jump back or the narration catches up."),
-                    },
-                    {
-                        text = _("Page turns move the audiobook"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("page_turn_skips_audio", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("page_turn_skips_audio", false)
-                        end,
-                        help_text = _("For books with a built-in audiobook, while it plays: turning to a later page than the one being read moves the audio to the first line of the new page. Turning back pauses it; Play then starts from the first line of the page you are on, or where the audiobook left off (see the next setting). Off by default."),
-                    },
-                    {
-                        text_func = function()
-                            local v = self:getSetting("back_turn_play_from", nil)
-                            local label = (v == "page" and _("this page"))
-                                or (v == "mark" and _("where it left off"))
-                                or _("ask")
-                            return T(_("After turning back, Play starts from: %1"), label)
-                        end,
-                        enabled_func = function()
-                            return self:getSetting("page_turn_skips_audio", false) and true or false
-                        end,
-                        sub_item_table = {
-                            {
-                                text = _("This page"),
-                                checked_func = function() return self:getSetting("back_turn_play_from", nil) == "page" end,
-                                callback = function() self:setSetting("back_turn_play_from", "page") end,
-                            },
-                            {
-                                text = _("Where the audiobook left off"),
-                                checked_func = function() return self:getSetting("back_turn_play_from", nil) == "mark" end,
-                                callback = function() self:setSetting("back_turn_play_from", "mark") end,
-                            },
-                            {
-                                text = _("Ask next time"),
-                                checked_func = function()
-                                    local v = self:getSetting("back_turn_play_from", nil)
-                                    return v ~= "page" and v ~= "mark"
-                                end,
-                                callback = function() self:setSetting("back_turn_play_from", "ask") end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Hold a word to play from there"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("hold_word_plays_audio", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("hold_word_plays_audio", false)
-                        end,
-                        help_text = _("For books with a built-in audiobook: hold on a word and lift your finger, and the audiobook plays from that sentence, with no menu. A long hold still opens the usual highlight menu, and holding then dragging still selects text. While this is on, a short hold no longer looks the word up in the dictionary. Off by default."),
-                    },
-                    {
-                        text = _("Keep the audiobook bar"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("keep_media_overlay_bar", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("keep_media_overlay_bar", false)
-                            local now = self:getSetting("keep_media_overlay_bar", false)
-                            local ms = self.media_sync
-                            if not ms then return end
-                            if now then
-                                if self:_hasMediaOverlays() then
-                                    pcall(function() ms:pinOverlayChrome() end)
-                                end
-                            else
-                                pcall(function()
-                                    if ms.playback_bar then
-                                        ms.playback_bar:hide()
-                                        ms.playback_bar = nil
-                                    end
-                                    ms:_releaseMiniBarSpace()
-                                end)
-                            end
-                        end,
-                        help_text = _("When enabled, the mini audiobook bar stays on screen after you stop narration. When disabled (default), the bar hides when idle."),
-                    },
-                    {
-                        text = _("Lock KOReader page margins"),
-                        enabled_func = function()
-                            return (self.ui and self.ui.document) and true or false
-                        end,
-                        checked_func = function()
-                            return self:getSetting("lock_koreader_page_margins", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("lock_koreader_page_margins", false)
-                            local now = self:getSetting("lock_koreader_page_margins", false)
-                            local ms = self.media_sync
-                            if not ms then return end
-                            if now then
-                                if self:_hasMediaOverlays() then
-                                    pcall(function() ms:pinOverlayChrome() end)
-                                end
-                            else
-                                pcall(function() ms:_releaseMiniBarSpace() end)
-                            end
-                        end,
-                        help_text = _("When enabled, the plugin writes this book’s bottom page margin into KOReader’s own settings before CRE typesets. The next open rebuilds the layout once (text stays above the audiobook bar); after that, KOReader reuses that layout, so starting a read-along no longer re-lays out the page. Works with or without the persistent bar. Disable to restore your original margins and edit them with KOReader’s usual controls."),
-                    },
-                    {
-                        text = _("Keep status bars during read-aloud"),
-                        enabled_func = function() return (self.ui and self.ui.document) or false end,
-                        checked_func = function()
-                            return self:getSetting("keep_reader_status_bars", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("keep_reader_status_bars", false)
-                        end,
-                        help_text = _("When enabled, the minimized read-aloud mini player sits above KOReader’s bottom status bar / progress bar (alt status bar at the top is unchanged). The page always reflows so book text ends above the mini player — the player never covers readable text. When disabled (default), the mini player sits at the bottom of the screen (may cover the status bar) but text is still reflowed above it."),
-                    },
                     {
                         text = _("Sleep timer"),
                         sub_item_table = {
@@ -1236,250 +1211,304 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("When enabled, the device will suspend after the sleep timer stops playback."),
                     },
                     {
-                        text = _("When holding a book"),
-                        sub_item_table = {
-                            {
-                                text = _("Audiobook or text-to-speech buttons"),
-                                checked_func = function()
-                                    return self:getSetting("open_choice_narrated", false)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("open_choice_narrated", false)
-                                end,
-                                help_text = _("Holding a book with a built-in audiobook (its cover or its row in the library) shows Play audiobook and Read aloud (TTS) in its menu. Off by default."),
-                            },
-                            {
-                                text = _("Text-to-speech button for books without audio"),
-                                checked_func = function()
-                                    return self:getSetting("open_choice_tts_only", false)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("open_choice_tts_only", false)
-                                end,
-                                help_text = _("Holding a book with no built-in audiobook shows Read aloud (TTS) in its menu. Off by default."),
-                            },
-                        },
-                    },
-                    {
-                        text_func = function()
-                            local off = self:getSetting("smil_sync_offset_ms", 0)
-                            return T(_("Overlay sync offset: %1 s"), string.format("%+.1f", off / 1000))
-                        end,
-                        keep_menu_open = true,
-                        callback = function(touchmenu_instance)
-                            local SpinWidget = require("ui/widget/spinwidget")
-                            local cur = self:getSetting("smil_sync_offset_ms", 0)
-                            UIManager:show(SpinWidget:new{
-                                title_text = _("Overlay sync offset"),
-                                info_text = _("Positive values delay the highlight (use when the highlight runs ahead of the narration); negative values advance it."),
-                                value = cur / 1000,
-                                value_min = -60,
-                                value_max = 60,
-                                value_step = 0.5,
-                                value_hold_step = 5,
-                                precision = "%.1f",
-                                ok_text = _("Set"),
-                                callback = function(spin)
-                                    self:setSetting("smil_sync_offset_ms", math.floor(spin.value * 1000))
-                                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                                end,
-                            })
-                        end,
-                        help_text = _("Shifts EPUB Media Overlay sentence highlighting relative to the audio. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio."),
-                    },
-                    {
-                        text = _("Large player bar"),
+                        text = _("Keep playing when lid is closed"),
                         checked_func = function()
-                            return self:getSetting("large_mini_bar", false)
+                            return self:getSetting("keep_playing_on_lid_close", false)
                         end,
                         callback = function()
-                            self:toggleSetting("large_mini_bar", false)
+                            self:toggleSetting("keep_playing_on_lid_close", false)
                         end,
-                        help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
-                    },
-                    {
-                        text = _("Floating player"),
-                        sub_item_table = {
-                            {
-                                text = _("Enable"),
-                                checked_func = function()
-                                    return self:getSetting("floating_enabled", true)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("floating_enabled", true)
-                                end,
-                                help_text = _("Turns both kinds of floating player below on or off. On by default."),
-                                separator = true,
-                            },
-                            {
-                                text = _("Appear when leaving the book"),
-                                enabled_func = function()
-                                    return self:getSetting("floating_enabled", true)
-                                end,
-                                checked_func = function()
-                                    return self:getSetting("floating_player", false)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("floating_player", false)
-                                end,
-                                help_text = _("Keep a read-along playing when you leave its book (Home, or opening the library). A small player floats at the bottom of the library and other screens; tap it for line skip, open the book, stop or hide. Reopening the book takes the narration back into the page. Off by default."),
-                            },
-                            {
-                                text = _("Appear over in-book menus"),
-                                enabled_func = function()
-                                    return self:getSetting("floating_enabled", true)
-                                end,
-                                checked_func = function()
-                                    return self:getSetting("bar_over_menus", true)
-                                end,
-                                callback = function()
-                                    self:toggleSetting("bar_over_menus", true)
-                                end,
-                                help_text = _("Keep the player bar on top of menus, lists and dialogs opened from the book. While one is open, hold an empty part of the bar and drag it to move it out of the way; it keeps that spot for menus and goes back to its place on the page. On by default."),
-                                separator = true,
-                            },
-                            {
-                                text = _("Show the floating player"),
-                                enabled_func = function() return detachedAlive() ~= nil end,
-                                callback = function() Audiobook._showFloating(true) end,
-                            },
-                        },
-                    },
-                    {
-                        text = _("Line-by-line view in the full-screen player"),
-                        checked_func = function()
-                            return self:getSetting("player_line_view", false)
-                        end,
-                        callback = function()
-                            self:toggleSetting("player_line_view", false)
-                        end,
-                        help_text = _("EPUB read-along: the full-screen player shows the previous, current and next sentence in place of the cover, with sync adjusters below. Applies the next time playback starts."),
+                        help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake while something is playing and suspends on its own within 30 seconds once playback stops or pauses. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
                     },
                 },
             },
-            -- ── Diagnostics ──
+            -- ── When holding a book ──
             {
-                text_func = function()
-                    if self.session_recorder and self.session_recorder:isRecording() then
-                        return _("Stop session recorder")
-                    end
-                    return _("Start session recorder")
-                end,
-                enabled_func = function()
-                    return self.session_recorder ~= nil
-                end,
-                callback = function(touchmenu_instance)
-                    if not self.session_recorder then return end
-                    if self.session_recorder:isRecording() then
-                        self.session_recorder:stop()
-                    else
-                        self.session_recorder:start()
-                    end
-                    if touchmenu_instance then
-                        touchmenu_instance:updateItems()
-                    end
-                end,
-                help_text = _("Records the current audiobook or TTS session. Audio, video/screenshots, and optional touch events are saved to a folder on device storage."),
+                text = _("When holding a book"),
+                sub_item_table = {
+                    {
+                        text = _("Audiobook or text-to-speech buttons"),
+                        checked_func = function()
+                            return self:getSetting("open_choice_narrated", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("open_choice_narrated", false)
+                        end,
+                        help_text = _("Holding a book with a built-in audiobook (its cover or its row in the library) shows Play audiobook and Read aloud (TTS) in its menu. Off by default."),
+                    },
+                    {
+                        text = _("Text-to-speech button for books without audio"),
+                        checked_func = function()
+                            return self:getSetting("open_choice_tts_only", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("open_choice_tts_only", false)
+                        end,
+                        help_text = _("Holding a book with no built-in audiobook shows Read aloud (TTS) in its menu. Off by default."),
+                    },
+                },
             },
+            -- ── Advanced ──
             {
-                text = _("Generate bug report"),
-                callback = function()
-                    BugReport.menuCallback(self)
-                end,
-                help_text = _("Saves a diagnostic report to your device storage. The report contains device model, TTS engine status, and audio configuration — no personal data or book content. Share it when reporting issues on GitHub."),
-            },
-            {
-                text = _("Run device benchmark"),
-                callback = function()
-                    if not self._init_ok then self:_showInitError(); return end
-                    if BenchmarkRunner then
-                        BenchmarkRunner.menuCallback(self)
-                    end
-                end,
-                enabled_func = function()
-                    return (self.ui and self.ui.document and self._init_ok and BenchmarkRunner ~= nil) or false
-                end,
-                help_text = _("Runs a standardized TTS benchmark on test sentences using each available engine (espeak-ng, Piper). Saves a report you can share on GitHub to help document device performance. Piper tests may take several minutes on slow devices."),
-            },
-            {
-                text = _("Check for updates"),
-                callback = function()
-                    if not Updater then
-                        -- PLUGIN_PATH already ends with a slash; adding
-                        -- another one gives updater.lua a "//" chunk path,
-                        -- which breaks its parent-directory derivation.
-                        local ok, mod = pcall(dofile, PLUGIN_PATH .. "updater.lua")
-                        if not ok then
-                            local UIManager = require("ui/uimanager")
-                            local InfoMessage = require("ui/widget/infomessage")
+                text = _("Advanced"),
+                sub_item_table = {
+                    {
+                        text_func = function()
+                            if not self._init_ok or not self.tts_engine or not self.tts_engine._wav_play_bin then
+                                return _("Audio output (PocketBook): N/A")
+                            end
+                            local pb_default = self.tts_engine._pb_has_tts_sm and "tts_sm" or ""
+                            local dev = self:getSetting("pb_alsa_device", pb_default)
+                            local labels = {
+                                ["tts_sm"] = _("PocketBook pipeline"),
+                                [""] = _("Auto"),
+                            }
+                            return T(_("Audio output (PocketBook): %1"), labels[dev] or dev)
+                        end,
+                        sub_item_table_func = function()
+                            return MenuBuilder.buildAlsaDeviceMenu(self)
+                        end,
+                        enabled_func = function()
+                            return (self._init_ok and self.tts_engine and self.tts_engine._wav_play_bin ~= nil) or false
+                        end,
+                        help_text = _("PocketBook devices route audio through different paths depending on firmware. The default works on most devices. Change this only if you hear no sound, distorted sound, or playback at 2-3x speed (known issue on PB631). Each option in the submenu has its own help text describing what to try."),
+                    },
+                    {
+                        text = _("Allow speaker playback without Bluetooth"),
+                        checked_func = function()
+                            return self:getSetting("pb_speaker_without_bt", false)
+                        end,
+                        callback = function()
+                            self:toggleSetting("pb_speaker_without_bt", false)
+                        end,
+                        enabled_func = function()
+                            return (self._init_ok and self.tts_engine and self.tts_engine._wav_play_bin ~= nil) or false
+                        end,
+                        help_text = _("By default, PocketBooks with a Bluetooth adapter only play through Bluetooth audio, because direct hardware access can damage the amplifier. This toggle lifts the Bluetooth requirement ONLY for daemon-routed devices (tts_sm, hwout_mix), which go through the PocketBook audio daemon like the system's own TTS and never touch the hardware directly. Direct-hardware choices (plughw:0) remain blocked without Bluetooth. Use at your own risk."),
+                    },
+                    {
+                        text_func = function()
+                            if self.tts_engine and self.tts_engine._android_pcm_auto then
+                                return _("Android: persistent audio stream (auto-enabled)")
+                            end
+                            return _("Android: persistent audio stream")
+                        end,
+                        checked_func = function()
+                            return self:getSetting("android_pcm_stream", false)
+                                or (self.tts_engine and self.tts_engine._android_pcm_auto) or false
+                        end,
+                        callback = function()
+                            self:toggleSetting("android_pcm_stream", false)
+                        end,
+                        enabled_func = function()
+                            return (Device.isAndroid and Device:isAndroid()) or false
+                        end,
+                        help_text = _("Workaround for Android devices where read-aloud audio cuts off mid-sentence and stalls (seen on some MTK e-readers). Plays synthesized audio through one persistent, continuously-fed audio track instead of a fresh media player per sentence. Leave this off for neural engines such as SherpaTTS: the persistent stream adds hiss and pitch artifacts. Off by default; the plugin also switches to it automatically for the rest of the session when it detects a stalled clip, except on neural engines. Takes effect from the next sentence."),
+                    },
+                    {
+                        text_func = function()
+                            if self.session_recorder and self.session_recorder:isRecording() then
+                                return _("Stop session recorder")
+                            end
+                            return _("Start session recorder")
+                        end,
+                        enabled_func = function()
+                            return self.session_recorder ~= nil
+                        end,
+                        callback = function(touchmenu_instance)
+                            if not self.session_recorder then return end
+                            if self.session_recorder:isRecording() then
+                                self.session_recorder:stop()
+                            else
+                                self.session_recorder:start()
+                            end
+                            if touchmenu_instance then
+                                touchmenu_instance:updateItems()
+                            end
+                        end,
+                        help_text = _("Records the current audiobook or TTS session. Audio, video/screenshots, and optional touch events are saved to a folder on device storage."),
+                    },
+                    {
+                        text = _("Session recorder settings"),
+                        sub_item_table = {
+                            {
+                                text_func = function()
+                                    local fps = self:getSetting("session_recorder_video_fps", 1)
+                                    return T(_("Video FPS: %1"), fps)
+                                end,
+                                sub_item_table = {
+                                    { text = "1", checked_func = function() return self:getSetting("session_recorder_video_fps", 1) == 1 end, callback = function() self:setSetting("session_recorder_video_fps", 1) end },
+                                    { text = "2", checked_func = function() return self:getSetting("session_recorder_video_fps", 1) == 2 end, callback = function() self:setSetting("session_recorder_video_fps", 2) end },
+                                    { text = "5", checked_func = function() return self:getSetting("session_recorder_video_fps", 1) == 5 end, callback = function() self:setSetting("session_recorder_video_fps", 5) end },
+                                },
+                                help_text = _("Frames per second for the video capture. Higher values use more CPU and storage."),
+                            },
+                            {
+                                text_func = function()
+                                    local scale = self:getSetting("session_recorder_video_scale", 0.5)
+                                    return T(_("Video scale: %1"), scale)
+                                end,
+                                sub_item_table = {
+                                    { text = "25%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 0.25 end, callback = function() self:setSetting("session_recorder_video_scale", 0.25) end },
+                                    { text = "50%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 0.5 end, callback = function() self:setSetting("session_recorder_video_scale", 0.5) end },
+                                    { text = "75%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 0.75 end, callback = function() self:setSetting("session_recorder_video_scale", 0.75) end },
+                                    { text = "100%", checked_func = function() return self:getSetting("session_recorder_video_scale", 0.5) == 1.0 end, callback = function() self:setSetting("session_recorder_video_scale", 1.0) end },
+                                },
+                                help_text = _("Resolution scaling for the video. Lower values reduce file size and CPU load."),
+                            },
+                            {
+                                text_func = function()
+                                    local q = self:getSetting("session_recorder_video_quality", 8)
+                                    return T(_("Video quality: %1"), q)
+                                end,
+                                sub_item_table = {
+                                    { text = "4", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 4 end, callback = function() self:setSetting("session_recorder_video_quality", 4) end },
+                                    { text = "8", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 8 end, callback = function() self:setSetting("session_recorder_video_quality", 8) end },
+                                    { text = "12", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 12 end, callback = function() self:setSetting("session_recorder_video_quality", 12) end },
+                                    { text = "16", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 16 end, callback = function() self:setSetting("session_recorder_video_quality", 16) end },
+                                    { text = "24", checked_func = function() return self:getSetting("session_recorder_video_quality", 8) == 24 end, callback = function() self:setSetting("session_recorder_video_quality", 24) end },
+                                },
+                                help_text = _("MJPEG quality (2 = best, 31 = worst). Lower values produce larger files."),
+                            },
+                            {
+                                text = _("Include audio in video file"),
+                                enabled_func = function()
+                                    return false
+                                end,
+                                checked_func = function()
+                                    return self:getSetting("session_recorder_video_include_audio", false)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("session_recorder_video_include_audio", false)
+                                end,
+                                help_text = _("When enabled, the recorder tries to mux ALSA audio into the video file in real time. This requires a working ALSA capture device and fails on most e-ink devices, so it is disabled."),
+                            },
+                            {
+                                text = _("Save separate audio files"),
+                                checked_func = function()
+                                    return self:getSetting("session_recorder_save_separate_audio", true)
+                                end,
+                                callback = function()
+                                    self:toggleSetting("session_recorder_save_separate_audio", true)
+                                end,
+                                help_text = _("When enabled, TTS and playback audio are saved as WAV files in the audio/ folder. When disabled, only the video file is kept."),
+                            },
+                            {
+                                text_func = function()
+                                    local max_s = self:getSetting("session_recorder_max_interval_s", 5)
+                                    return T(_("Screenshot max interval: %1s"), max_s)
+                                end,
+                                sub_item_table = {
+                                    { text = "5s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 5 end, callback = function() self:setSetting("session_recorder_max_interval_s", 5) end },
+                                    { text = "10s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 10 end, callback = function() self:setSetting("session_recorder_max_interval_s", 10) end },
+                                    { text = "30s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 30 end, callback = function() self:setSetting("session_recorder_max_interval_s", 30) end },
+                                    { text = "60s", checked_func = function() return self:getSetting("session_recorder_max_interval_s", 5) == 60 end, callback = function() self:setSetting("session_recorder_max_interval_s", 60) end },
+                                },
+                                help_text = _("Maximum time between forced screenshot frames when the screen is static."),
+                            },
+                        },
+                    },
+                    {
+                        text = _("Run device benchmark"),
+                        callback = function()
+                            if not self._init_ok then self:_showInitError(); return end
+                            if BenchmarkRunner then
+                                BenchmarkRunner.menuCallback(self)
+                            end
+                        end,
+                        enabled_func = function()
+                            return (self.ui and self.ui.document and self._init_ok and BenchmarkRunner ~= nil) or false
+                        end,
+                        help_text = _("Runs a standardized TTS benchmark on test sentences using each available engine (espeak-ng, Piper). Saves a report you can share on GitHub to help document device performance. Piper tests may take several minutes on slow devices."),
+                    },
+                    {
+                        text = _("Generate bug report"),
+                        callback = function()
+                            BugReport.menuCallback(self)
+                        end,
+                        help_text = _("Saves a diagnostic report to your device storage. The report contains device model, TTS engine status, and audio configuration — no personal data or book content. Share it when reporting issues on GitHub."),
+                    },
+                    {
+                        text = _("Check for updates"),
+                        callback = function()
+                            if not Updater then
+                                -- PLUGIN_PATH already ends with a slash; adding
+                                -- another one gives updater.lua a "//" chunk path,
+                                -- which breaks its parent-directory derivation.
+                                local ok, mod = pcall(dofile, PLUGIN_PATH .. "updater.lua")
+                                if not ok then
+                                    local UIManager = require("ui/uimanager")
+                                    local InfoMessage = require("ui/widget/infomessage")
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("Could not load updater module."),
+                                    })
+                                    return
+                                end
+                                Updater = mod
+                            end
+                            Updater.checkForUpdate(self)
+                        end,
+                        help_text = _("Checks GitHub for a newer release. If an update is available, downloads and installs it. Requires Wi-Fi."),
+                    },
+                    {
+                        text = _("About / Debug info"),
+                        callback = function()
+                            local lines = {}
+                            -- Plugin version
+                            local ok, meta = pcall(dofile, PLUGIN_PATH .. "_meta.lua")
+                            if ok and meta then
+                                table.insert(lines, T(_("Plugin: Audiobook Read-Along %1"), meta.version or "unknown"))
+                            end
+                            -- KOReader version
+                            local rev = "unknown"
+                            local ok_v, Version = pcall(require, "version")
+                            if ok_v and Version and Version.getCurrentRevision then
+                                rev = Version:getCurrentRevision() or rev
+                            else
+                                local rev_file = io.open("git-rev", "r")
+                                if rev_file then
+                                    rev = rev_file:read("*l") or rev
+                                    rev_file:close()
+                                end
+                            end
+                            table.insert(lines, T(_("KOReader: %1"), rev))
+                            -- Device info
+                            local model = (Device.getDeviceModel and Device:getDeviceModel())
+                                or (Device.model or "unknown")
+                            local platform = (Device.getPlatform and Device:getPlatform())
+                                or (Device.platform or "unknown")
+                            table.insert(lines, T(_("Device: %1 (%2)"), model, platform))
+                            -- TTS backend
+                            local engine = self.tts_engine
+                            if engine then
+                                local backend_name = engine.backend or "none"
+                                local backend_labels = {
+                                    espeak = "espeak-ng",
+                                    piper = "Piper",
+                                    pico = "Pico",
+                                    flite = "Flite",
+                                    festival = "Festival",
+                                    android = "Android",
+                                }
+                                table.insert(lines, T(_("TTS backend: %1"), backend_labels[backend_name] or backend_name))
+                                -- Audio player
+                                -- findAudioPlayer() only runs at first playback, so
+                                -- before that the type is unset; on Android the JNI
+                                -- bridge alone tells us the player is MediaPlayer.
+                                local player = engine.audio_player_type
+                                    or (engine._android_tts and "android" or "none")
+                                table.insert(lines, T(_("Audio player: %1"), player))
+                            end
+                            -- Plugin directory
+                            table.insert(lines, T(_("Plugin path: %1"), PLUGIN_PATH or "unknown"))
                             UIManager:show(InfoMessage:new{
-                                text = _("Could not load updater module."),
+                                text = table.concat(lines, "\n"),
+                                timeout = 10,
                             })
-                            return
-                        end
-                        Updater = mod
-                    end
-                    Updater.checkForUpdate(self)
-                end,
-                help_text = _("Checks GitHub for a newer release. If an update is available, downloads and installs it. Requires Wi-Fi."),
-            },
-            {
-                text = _("About / Debug info"),
-                callback = function()
-                    local lines = {}
-                    -- Plugin version
-                    local ok, meta = pcall(dofile, PLUGIN_PATH .. "_meta.lua")
-                    if ok and meta then
-                        table.insert(lines, T(_("Plugin: Audiobook Read-Along %1"), meta.version or "unknown"))
-                    end
-                    -- KOReader version
-                    local rev = "unknown"
-                    local ok_v, Version = pcall(require, "version")
-                    if ok_v and Version and Version.getCurrentRevision then
-                        rev = Version:getCurrentRevision() or rev
-                    else
-                        local rev_file = io.open("git-rev", "r")
-                        if rev_file then
-                            rev = rev_file:read("*l") or rev
-                            rev_file:close()
-                        end
-                    end
-                    table.insert(lines, T(_("KOReader: %1"), rev))
-                    -- Device info
-                    local model = (Device.getDeviceModel and Device:getDeviceModel())
-                        or (Device.model or "unknown")
-                    local platform = (Device.getPlatform and Device:getPlatform())
-                        or (Device.platform or "unknown")
-                    table.insert(lines, T(_("Device: %1 (%2)"), model, platform))
-                    -- TTS backend
-                    local engine = self.tts_engine
-                    if engine then
-                        local backend_name = engine.backend or "none"
-                        local backend_labels = {
-                            espeak = "espeak-ng",
-                            piper = "Piper",
-                            pico = "Pico",
-                            flite = "Flite",
-                            festival = "Festival",
-                            android = "Android",
-                        }
-                        table.insert(lines, T(_("TTS backend: %1"), backend_labels[backend_name] or backend_name))
-                        -- Audio player
-                        -- findAudioPlayer() only runs at first playback, so
-                        -- before that the type is unset; on Android the JNI
-                        -- bridge alone tells us the player is MediaPlayer.
-                        local player = engine.audio_player_type
-                            or (engine._android_tts and "android" or "none")
-                        table.insert(lines, T(_("Audio player: %1"), player))
-                    end
-                    -- Plugin directory
-                    table.insert(lines, T(_("Plugin path: %1"), PLUGIN_PATH or "unknown"))
-                    UIManager:show(InfoMessage:new{
-                        text = table.concat(lines, "\n"),
-                        timeout = 10,
-                    })
-                end,
-                help_text = _("Shows plugin version, KOReader version, device model, active TTS backend, and audio player. Useful when reporting issues."),
+                        end,
+                        help_text = _("Shows plugin version, KOReader version, device model, active TTS backend, and audio player. Useful when reporting issues."),
+                    },
+                },
             },
         },
     }
