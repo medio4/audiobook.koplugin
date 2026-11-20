@@ -739,12 +739,14 @@ function BtUI._autoConnectAtStart(plugin)
     if not bt or not address then return false end
     local name = plugin:getSetting("bt_device_name", nil)
     if plugin._bt_auto_connecting then
-        -- Already connecting (e.g. started when the book opened): playback
-        -- starts by itself once the headset is up.
-        UIManager:show(InfoMessage:new{
-            text = name and T(_("Connecting to %1..."), name) or _("Connecting to the headset..."),
-            timeout = 3,
-        })
+        -- Already connecting (started when Play was pressed): playback
+        -- starts by itself once the headset is up. Say so near the bar,
+        -- as a toast that does not block page turns.
+        local text = name and T(_("Connecting to %1..."), name) or _("Connecting to the headset...")
+        local bar = plugin.media_sync and plugin.media_sync.playback_bar
+        if bar and bar._showHint then
+            pcall(bar._showHint, bar, text)
+        end
         return true
     end
     plugin._bt_auto_connecting = true
@@ -783,14 +785,14 @@ function BtUI._autoConnectAtStart(plugin)
     return true
 end
 
---- A book with an audiobook was opened: start connecting the saved headset
---- now, quietly (no dialog), so it is ready by the time Play is pressed.
+--- Play was pressed on a read-along: start connecting the saved headset
+--- now, quietly (no dialog), while the audiobook loads, instead of after.
 --- Turning Bluetooth on and paging AirPods takes 20-25 s on a Clara BW.
---- Play during the connect joins it (_autoConnectAtStart sees it running).
---- Gives up silently; Play then connects (or prompts) as before.
+--- When the audio starts, _autoConnectAtStart sees this connect running
+--- and joins it; playback starts once the headset is up.
 -- @treturn bool true when a connect was started
 function BtUI.preconnectForBook(plugin, doc_path)
-    if not plugin:getSetting("bt_connect_on_open", true) then return false end
+    if not plugin:getSetting("bt_connect_on_play", true) then return false end
     local bt = plugin.bt_manager
     local address = plugin:getSetting("bt_device_addr", nil)
     if not bt or not address then return false end
@@ -798,26 +800,31 @@ function BtUI.preconnectForBook(plugin, doc_path)
     local ok_c, up = pcall(bt.anyAudioDeviceConnected, bt)
     if ok_c and up then return false end
     plugin._bt_auto_connecting = true
-    logger.warn("BtUI: book with audio opened; connecting", address, "in the background")
+    logger.warn("BtUI: Play pressed; connecting", address, "while the audiobook loads")
     local function book_open()
         local doc = plugin.ui and plugin.ui.document
         return doc ~= nil and (doc.file_path or doc.file) == doc_path
     end
+    local function starting()
+        local ms = plugin.media_sync
+        return plugin._overlay_job ~= nil or plugin._bar_loading ~= nil
+            or (ms ~= nil and ms.state ~= "stopped")
+    end
     BtUI._connectLoop(plugin, address, {
         power_on = true,
         still_wanted = function()
-            -- Keep going while the book is open, or once Play took it over.
-            if book_open() or mediaPlaying(plugin) then return true end
+            -- Keep going while this book loads or plays; stop on ✕/close.
+            if (book_open() and starting()) or mediaPlaying(plugin) then return true end
             plugin._bt_auto_connecting = nil
             return false
         end,
         on_back = function(s)
             plugin._bt_auto_connecting = nil
-            logger.warn("BtUI: headset ready", s, "s after the book opened")
+            logger.warn("BtUI: headset ready", s, "s after Play")
         end,
         on_give_up = function()
             plugin._bt_auto_connecting = nil
-            logger.warn("BtUI: headset not found after the book opened")
+            logger.warn("BtUI: headset not found after Play")
             -- Play joined this connect and is waiting on it: same prompt
             -- as a connect started by Play.
             local ms = plugin.media_sync

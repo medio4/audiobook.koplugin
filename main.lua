@@ -688,17 +688,17 @@ function Audiobook:addToMainMenu(menu_items)
                         help_text = _("When the headset drops while a book is playing, pause, reconnect without asking, and resume where you were. The link is checked every 5 seconds while this is on.\n\nIf it cannot reconnect within 2 minutes, the Reconnect prompt appears instead. Off: you get the disconnect message and the prompt, as before."),
                     },
                     {
-                        text = _("Connect headset when a book with audio opens"),
+                        text = _("Connect headset as soon as Play is pressed"),
                         enabled_func = function()
                             return not (Device.isKindle and Device:isKindle())
                         end,
                         checked_func = function()
-                            return self:getSetting("bt_connect_on_open", true)
+                            return self:getSetting("bt_connect_on_play", true)
                         end,
                         callback = function()
-                            self:toggleSetting("bt_connect_on_open", true)
+                            self:toggleSetting("bt_connect_on_play", true)
                         end,
-                        help_text = _("When you open a book that has a built-in audiobook (or a matching audio file), turn Bluetooth on and connect your saved headset in the background, so it is ready when you press Play. Books without audio are left alone. Gives up quietly after 2 minutes if the headset is not around. On by default."),
+                        help_text = _("When you press Play on a read-along, turn Bluetooth on and start connecting your saved headset at once, while the audiobook loads, instead of after loading. Playback starts as soon as both are ready. If the headset is not around, the usual Reconnect prompt appears after 2 minutes. On by default."),
                     },
                     {
                         text = _("Reconnect BT on track change"),
@@ -2257,12 +2257,16 @@ end
 --- saved position) without starting audio; Play continues from the mark.
 function Audiobook:_startSmilPlayback(doc_path, start_entry, allow_resume, opts)
     opts = opts or {}
+    if not opts.prepare_only and not opts._bar_loading then
+        self:_connectHeadsetForPlay(doc_path)
+    end
     self:_withBarLoading(doc_path, opts, function()
         self:_startSmilPlaybackNow(doc_path, start_entry, allow_resume, opts)
     end)
 end
 
 function Audiobook:_startSmilPlaybackFromSelection(doc_path, selected_text, allow_resume, bar_ready)
+    if not bar_ready then self:_connectHeadsetForPlay(doc_path) end
     self:_withBarLoading(doc_path, { _bar_loading = bar_ready }, function()
         self:_startSmilPlaybackFromSelectionNow(doc_path, selected_text, allow_resume)
     end)
@@ -5141,7 +5145,6 @@ function Audiobook:onReaderReady()
     -- the page; another book keeps the bubble on top.
     pcall(self._reattachFloating, self)
     if not self._init_ok or not self.media_sync then return end
-    self:_scheduleHeadsetPreconnect()
     if not self:getSetting("keep_media_overlay_bar", false) then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
     local ds = self.ui.doc_settings
@@ -5155,24 +5158,20 @@ function Audiobook:onReaderReady()
     end)
 end
 
---- A book with audio was opened: connect the saved headset in the
---- background (setting "Connect headset when a book with audio opens").
---- Waits a moment so the page is drawn first; only for books that have a
---- built-in audiobook or a matching audio file.
-function Audiobook:_scheduleHeadsetPreconnect()
+--- Play was pressed on a read-along: start connecting the saved headset
+--- right away, alongside the loading, instead of after it (setting
+--- "Connect headset as soon as Play is pressed"). Runs just after the bar
+--- has drawn "Loading audiobook…", since turning Bluetooth on blocks ~3 s.
+function Audiobook:_connectHeadsetForPlay(doc_path)
     if Device.isKindle and Device:isKindle() then return end
     if not (BtUI and BtUI.preconnectForBook) then return end
-    if not self:getSetting("bt_connect_on_open", true) then return end
+    if not self:getSetting("bt_connect_on_play", true) then return end
     if not self:getSetting("bt_device_addr", nil) then return end
-    local doc_path = self:_openDocPath()
-    if not doc_path then return end
-    UIManager:scheduleIn(2, function()
+    if not doc_path or self:_openDocPath() ~= doc_path then return end
+    UIManager:scheduleIn(0.2, function()
         if self:_openDocPath() ~= doc_path then return end
-        local has_audio = self:_hasMediaOverlays()
-            or self:_findMatchingAudiobook(doc_path) ~= nil
-        if not has_audio then return end
         local ok, err = pcall(BtUI.preconnectForBook, self, doc_path)
-        if not ok then logger.warn("Audiobook: headset preconnect failed:", err) end
+        if not ok then logger.warn("Audiobook: headset connect at Play failed:", err) end
     end)
 end
 
