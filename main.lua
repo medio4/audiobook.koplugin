@@ -592,8 +592,12 @@ function Audiobook:addToMainMenu(menu_items)
         sorting_hint = "tools",
         sub_item_table = {
             -- ── Play ──
+            -- Icons from the symbol font KOReader ships (nerdfonts/symbols.ttf,
+            -- a UI fallback on stock KOReader, ZenOS and SimpleUI alike):
+            -- U+F025 headphones, U+F028 speaker. A divider under the pair
+            -- sets the two ways to start apart from the settings.
             {
-                text = _("Play audiobook"),
+                text = "\239\128\165  " .. _("Play audiobook"),
                 enabled_func = function()
                     return (self._init_ok and self.media_sync ~= nil
                             and ((self.ui and self.ui.document) or self:_isFileManager())) or false
@@ -604,7 +608,8 @@ function Audiobook:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Read aloud (text-to-speech) from this page"),
+                text = "\239\128\168  " .. _("Read aloud (text-to-speech) from this page"),
+                separator = true,
                 enabled_func = function() return (self.ui and self.ui.document) or false end,
                 callback = function(touchmenu_instance)
                     if touchmenu_instance then touchmenu_instance:closeMenu() end
