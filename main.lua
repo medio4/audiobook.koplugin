@@ -5436,40 +5436,31 @@ function Audiobook:_ensureAudiobookChromeMargins()
     return self:_applyAudiobookChromeMarginsLive()
 end
 
---- Home screen "Play audiobook" on a book that is not open yet: reserve
---- the bar's room before the book is laid out for the first time, so it
---- is laid out once instead of again when the bar arrives.
+--- Lay a book out once, with the bar's room already in it, when:
+--- - it was closed with the bar's room in place (the floating player kept
+---   playing): KOReader saved that layout, and opening it without the room
+---   threw the saved layout away and laid the whole book out again, or
+--- - it is opened with Play from the home screen: the bar is coming.
 function Audiobook:onPreRenderDocument()
-    local pending = Audiobook._pending_aligned_start
-    if not (pending and pending.action == "start") then return end
     local doc = self.ui and self.ui.document
-    local path = doc and (doc.file_path or doc.file)
-    if not path or path ~= pending.path or not self.ui.rolling then return end
+    if not (doc and self.ui.rolling) then return end
     -- Locked margins are already in the book's settings (onDocSettingsLoad).
     if self:_shouldLockKoreaderMargins() then return end
-    -- The bar does not exist yet: use the height it will be built with.
+    local path = doc.file_path or doc.file
+    local ds = self.ui.doc_settings
+    local saved = ds and tonumber(ds:readSetting("audiobook_bar_room_px"))
+    local pending = Audiobook._pending_aligned_start
+    local play = pending and pending.action == "start" and path == pending.path
+    if not (saved or play) then return end
+    -- The bar does not exist yet: use the height it will be built with,
+    -- or the exact room it was closed with.
     local bar_h = Device.screen:scaleBySize(
         self:getSetting("large_mini_bar", false) and 76 or 44)
-    -- Diagnostic: anything else that sets the margins during this open
-    -- (a second layout), logged with who called it. A few lines at most.
-    if doc.setPageMargins and not doc._ab_margin_log then
-        local orig_set, n = doc.setPageMargins, 0
-        doc._ab_margin_log = true
-        doc.setPageMargins = function(d, l, t, r, b, ...)
-            n = n + 1
-            if n <= 6 then
-                local info = debug.getinfo(2, "Sl")
-                logger.warn("Audiobook: margins set", l, t, r, b, "by",
-                    info and (info.short_src .. ":" .. tostring(info.currentline)) or "?")
-            end
-            return orig_set(d, l, t, r, b, ...)
-        end
-    end
-    local ok, err = pcall(self._applyAudiobookChromeMarginsLive, self, bar_h, true)
+    local ok, err = pcall(self._applyAudiobookChromeMarginsLive, self, bar_h, true, saved)
     if not ok then logger.warn("Audiobook: pre-layout bar room failed:", err) end
 end
 
-function Audiobook:_applyAudiobookChromeMarginsLive(bar_h_override, before_render)
+function Audiobook:_applyAudiobookChromeMarginsLive(bar_h_override, before_render, exact_bottom)
     local ui = self.ui
     local tp = ui and ui.typeset
     if not (tp and tp.unscaled_margins and ui.document and ui.document.setPageMargins) then
@@ -5490,11 +5481,15 @@ function Audiobook:_applyAudiobookChromeMarginsLive(bar_h_override, before_rende
         end
         bottom = bottom + fh
     end
+    if exact_bottom then bottom = exact_bottom end
     local ok = pcall(ui.document.setPageMargins, ui.document,
         screen:scaleBySize(m[1]), screen:scaleBySize(m[2]),
         screen:scaleBySize(m[3]), bottom)
     if ok then
         self._audiobook_chrome_margins_applied = true
+        -- Remembered with the book: if it closes like this, it reopens
+        -- like this (see onPreRenderDocument).
+        if ui.doc_settings then ui.doc_settings:saveSetting("audiobook_bar_room_px", bottom) end
         -- Before the first layout there is no position to update yet.
         if not before_render then ui:handleEvent(Event:new("UpdatePos")) end
         logger.warn("Audiobook: bar room", before_render and "before first layout" or "now",
@@ -5517,6 +5512,7 @@ function Audiobook:_releaseAudiobookChromeMargins()
     logger.warn("Audiobook: bar room released")
     local ui = self.ui
     if not ui then return end
+    if ui.doc_settings then ui.doc_settings:delSetting("audiobook_bar_room_px") end
     local ds = ui.doc_settings
     local orig = ds and ds:readSetting("audiobook_overlay_orig_bottom")
     if orig ~= nil and self.media_sync and self.media_sync._persistBottomMargin then
@@ -5685,6 +5681,19 @@ function Audiobook:onReaderReady()
     if not self._init_ok or not self.media_sync then return end
     pcall(self._installHoldToPlay, self)
     pcall(self._installBackTurnGuard, self)
+    -- The book opened with the bar's room (onPreRenderDocument) but no bar
+    -- came back (the floating player had been stopped): give the room back.
+    if self._audiobook_chrome_margins_applied then
+        UIManager:scheduleIn(4, function()
+            local ms = self.media_sync
+            if not (ms and self.ui and self.ui.document) then return end
+            if self._bar_loading or Audiobook._pending_aligned_start then return end
+            if ms.playback_bar or ms.state ~= ms.STATE.STOPPED then return end
+            if not self._audiobook_chrome_margins_applied then return end
+            logger.warn("Audiobook: no bar came back; giving its room back")
+            pcall(self._releaseAudiobookChromeMargins, self)
+        end)
+    end
     if not self:getSetting("keep_media_overlay_bar", false) then return end
     if not (self.ui and self.ui.rolling and self.ui.document) then return end
     local ds = self.ui.doc_settings
