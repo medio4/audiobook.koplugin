@@ -551,6 +551,41 @@ function Audiobook:onDispatcherRegisterActions()
     })
 end
 
+--- Arrange list (KOReader's SortWidget: tap an item, move it with the
+--- arrows; the same widget under ZenOS and SimpleUI) for the bar's buttons
+--- or the off-page choices. Saves the order and re-lays out the bar.
+function Audiobook:_arrangeBarItems(key, title)
+    local ok, ABP = pcall(dofile, PLUGIN_PATH .. "audiobookplayer.lua")
+    if not (ok and ABP) then
+        logger.warn("Audiobook: arrange: player module failed:", ABP)
+        return
+    end
+    local probe = setmetatable({ plugin = self }, { __index = ABP })
+    local items_def = key == "return_choice_order" and ABP.CHOICE_ITEMS or ABP.BAR_ITEMS
+    local order = key == "return_choice_order" and probe:_choiceOrder() or probe:_barOrder()
+    local labels = {}
+    for _i, it in ipairs(items_def) do labels[it.id] = it.label() end
+    local item_table = {}
+    for _i, id in ipairs(order) do
+        table.insert(item_table, { text = labels[id] or id, id = id })
+    end
+    local SortWidget = require("ui/widget/sortwidget")
+    local sw
+    sw = SortWidget:new{
+        title = title,
+        item_table = item_table,
+        callback = function()
+            local ids = {}
+            for _i, it in ipairs(sw.item_table) do table.insert(ids, it.id) end
+            self:setSetting(key, ids)
+            logger.warn("Audiobook: saved", key, table.concat(ids, ","))
+            local bar = self.media_sync and self.media_sync.playback_bar
+            if bar and bar.refreshLayout then pcall(bar.refreshLayout, bar) end
+        end,
+    }
+    UIManager:show(sw)
+end
+
 --- Gesture manager action "Play audiobook from here".
 function Audiobook:onAudiobookPlayFromHere(ges)
     if not self._init_ok or not self.media_sync then return true end
@@ -895,6 +930,28 @@ function Audiobook:addToMainMenu(menu_items)
                             self:toggleSetting("large_mini_bar", false)
                         end,
                         help_text = _("A taller player bar with bigger buttons that are easier to hit. Off by default. Applies the next time playback starts."),
+                    },
+                    {
+                        text = _("Arrange the bar's buttons"),
+                        keep_menu_open = true,
+                        enabled_func = function()
+                            return self:getSetting("large_mini_bar", false) and true or false
+                        end,
+                        callback = function()
+                            self:_arrangeBarItems("bar_button_order", _("Arrange the bar's buttons"))
+                        end,
+                        help_text = _("Tap an item, then move it with the arrows. Buttons above \"Title and time\" sit to its left, those below it to its right; ✕ stays at the end. Buttons appear only where they apply (line buttons in read-along, for example). Large player bar only."),
+                    },
+                    {
+                        text = _("Arrange the choices off the read-along page"),
+                        keep_menu_open = true,
+                        enabled_func = function()
+                            return self:getSetting("large_mini_bar", false) and true or false
+                        end,
+                        callback = function()
+                            self:_arrangeBarItems("return_choice_order", _("Arrange the choices"))
+                        end,
+                        help_text = _("The order of Here, Resume and Back in the bar while the page on screen is not the one being read. Large player bar only."),
                     },
                     {
                         text = _("Floating player"),

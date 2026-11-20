@@ -1723,6 +1723,99 @@ end
 --- (_isTapOnMiniButton), a wide outlined play/pause as the anchor, and a
 --- single rule on top instead of a boxed frame.  Carries the same buttons
 --- as the classic bar and sets the same self._mini_* fields.
+-- ── Arrangeable bar ──────────────────────────────────────────────────
+-- Default order of the large bar, left to right. "title" is the title and
+-- clock: items before it sit on its left, items after it on its right.
+-- ✕ always stays last. Labels are for the arrange list.
+AudiobookPlayer.BAR_ITEMS = {
+    { id = "line_back",    label = function() return _("Previous line") end },
+    { id = "play",         label = function() return _("Play / pause") end },
+    { id = "line_forward", label = function() return _("Next line") end },
+    { id = "chapters",     label = function() return _("Chapters") end },
+    { id = "title",        label = function() return _("— Title and time —") end },
+    { id = "sync_minus",   label = function() return _("Sync earlier") end },
+    { id = "sync_plus",    label = function() return _("Sync later") end },
+    { id = "vol_down",     label = function() return _("Volume down") end },
+    { id = "vol_up",       label = function() return _("Volume up") end },
+    { id = "locate",       label = function() return _("Go to the read-along line") end },
+    { id = "speed",        label = function() return _("Speed (text-to-speech)") end },
+    { id = "settings",     label = function() return _("Settings (text-to-speech)") end },
+}
+
+-- The ways back shown off the read-along page, default order.
+AudiobookPlayer.CHOICE_ITEMS = {
+    { id = "page", label = function() return "▶ " .. _("Here") end },
+    { id = "mark", label = function() return "▶ " .. _("Resume") end },
+    { id = "back", label = function() return "↩ " .. _("Back") end },
+}
+
+local function savedOrder(plugin, key, items)
+    local saved = plugin and plugin.getSetting and plugin:getSetting(key, nil)
+    local seq, seen, known = {}, {}, {}
+    for _i, it in ipairs(items) do known[it.id] = true end
+    if type(saved) == "table" then
+        for _i, id in ipairs(saved) do
+            if known[id] and not seen[id] then
+                table.insert(seq, id)
+                seen[id] = true
+            end
+        end
+    end
+    -- Items the saved list does not know yet (new buttons) keep their
+    -- default side: before the title if they are before it by default.
+    local title_pos
+    for i, id in ipairs(seq) do if id == "title" then title_pos = i end end
+    local before_title = true
+    for _i, it in ipairs(items) do
+        if it.id == "title" then before_title = false end
+        if not seen[it.id] then
+            if before_title and title_pos then
+                table.insert(seq, title_pos, it.id)
+                title_pos = title_pos + 1
+            else
+                table.insert(seq, it.id)
+                if it.id == "title" then title_pos = #seq end
+            end
+            seen[it.id] = true
+        end
+    end
+    return seq
+end
+
+--- The full saved bar order (ids), defaults filled in.
+function AudiobookPlayer:_barOrder()
+    return savedOrder(self.plugin, "bar_button_order", AudiobookPlayer.BAR_ITEMS)
+end
+
+--- The saved order of the ways back (ids).
+function AudiobookPlayer:_choiceOrder()
+    return savedOrder(self.plugin, "return_choice_order", AudiobookPlayer.CHOICE_ITEMS)
+end
+
+--- Split the widgets present (by id) into left-of-title and right-of-title
+--- lists following the saved order.
+function AudiobookPlayer:_orderBar(by_id)
+    local left, right = {}, {}
+    local side = left
+    for _i, id in ipairs(self:_barOrder()) do
+        if id == "title" then
+            side = right
+        elseif by_id[id] then
+            table.insert(side, by_id[id])
+        end
+    end
+    return left, right
+end
+
+--- Re-lay out the bar after its order changed.
+function AudiobookPlayer:refreshLayout()
+    if self.large_mini_bar then
+        pcall(self._buildLargeMiniBar, self)
+        self:_updateMiniWidgets()
+        UIManager:setDirty(self, function() return "ui", self.dimen end)
+    end
+end
+
 function AudiobookPlayer:_buildLargeMiniBar()
     self._mini_height = Screen:scaleBySize(76)
     local rule_h = Size.line.thick
@@ -1832,6 +1925,7 @@ function AudiobookPlayer:_buildLargeMiniBar()
     -- (paused: play here / resume / go back; playing: pause / go back),
     -- and return once the view is back in sync (setReturnHint rebuilds).
     self._mini_choice_buttons = nil
+    local choice_box
     if choice_mode then
         -- One outlined box, split into segments (like the play button grown
         -- sideways): paused, play here / resume / back; playing, pause / back.
@@ -1840,8 +1934,14 @@ function AudiobookPlayer:_buildLargeMiniBar()
         if self.is_playing then
             specs = { { "⏸ " .. _("Pause"), "pause" }, { "↩ " .. _("Back"), "back" } }
         else
-            specs = { { "▶ " .. _("Here"), "page" }, { "▶ " .. _("Resume"), "mark" },
-                      { "↩ " .. _("Back"), "back" } }
+            -- In the order chosen under Player bar > Arrange the choices.
+            local by_kind = {}
+            for _i, c in ipairs(AudiobookPlayer.CHOICE_ITEMS) do by_kind[c.id] = c end
+            specs = {}
+            for _i, id in ipairs(self:_choiceOrder()) do
+                local c = by_kind[id]
+                if c then table.insert(specs, { c.label(), id }) end
+            end
         end
         local seg_font = 15
         local seg_pad = Screen:scaleBySize(12)
@@ -1877,13 +1977,14 @@ function AudiobookPlayer:_buildLargeMiniBar()
             end
             table.insert(seg_items, b)
         end
-        left_buttons = { FrameContainer:new{
+        choice_box = FrameContainer:new{
             bordersize = Size.border.thick,
             radius = Screen:scaleBySize(10),
             padding = 0,
             margin = 0,
             HorizontalGroup:new(seg_items),
-        } }
+        }
+        left_buttons = { choice_box }
     elseif line_skip then
         left_buttons = { self._mini_line_back, self._mini_play_pause, self._mini_line_forward }
     else
@@ -1910,6 +2011,33 @@ function AudiobookPlayer:_buildLargeMiniBar()
         -- Not on the bar now: drop them so a tap cannot hit where they were.
         self._mini_refocus = nil
         self._mini_line_back, self._mini_line_forward = nil, nil
+    end
+
+    -- The saved order (Player bar > Arrange the bar's buttons): which side
+    -- of the title each button sits on, and in what order. The ways back
+    -- take the play button's place while they show.
+    do
+        local by_id = {
+            line_back = self._mini_line_back,
+            play = choice_box or self._mini_play_pause,
+            line_forward = self._mini_line_forward,
+            chapters = self._mini_chapters,
+            sync_minus = show_sync and self._mini_sync_minus or nil,
+            sync_plus = show_sync and self._mini_sync_plus or nil,
+            vol_down = self._mini_vol_minus,
+            vol_up = self._mini_vol_plus,
+            locate = (not choice_mode) and self._mini_refocus or nil,
+            speed = self.tts_mode and self._mini_speed or nil,
+            settings = self.tts_mode and self._mini_settings or nil,
+        }
+        -- Only what this layout would have shown.
+        local shown = {}
+        for _i, b in ipairs(left_buttons) do shown[b] = true end
+        for _i, b in ipairs(right_buttons) do shown[b] = true end
+        for id, w in pairs(by_id) do
+            if not shown[w] then by_id[id] = nil end
+        end
+        left_buttons, right_buttons = self:_orderBar(by_id)
     end
 
     -- Whatever width the buttons actually take leaves the rest to the
