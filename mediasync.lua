@@ -1803,12 +1803,17 @@ function MediaSync:_commitSelection()
     self:seekToTime(math.max(0, t))
 end
 
---- Move n narrated lines (sentences) back (n < 0) or forward (n > 0).
+--- Move n taps of the line buttons back (n < 0) or forward (n > 0).
+--- Each tap moves "line_skip_count" narrated lines (setting, default 1).
 -- @treturn bool true when a line was selected
 function MediaSync:skipLines(n)
     if not (self.timing_data and #self.timing_data > 0 and self.media_engine) then
         return false
     end
+    local per = self.plugin and self.plugin.getSetting
+        and tonumber(self.plugin:getSetting("line_skip_count", 1)) or 1
+    per = math.max(1, math.min(50, math.floor(per)))
+    n = n * per
     local base = self:_skipBase()
     local idx = math.max(1, math.min(#self.timing_data, base + n))
     logger.warn("MediaSync: skip", n, "line(s):", base, "->", idx)
