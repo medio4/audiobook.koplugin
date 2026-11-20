@@ -553,9 +553,18 @@ function AudiobookPlayer:setupUI()
     -- Line-by-line view: sync adjusters, same job as the mini bar's − / +.
     local sync_row
     if self.lines_mode and self.on_sync_nudge and not is_landscape then
-        self.sync_widget = TextWidget:new{
+        -- The label itself opens the sync control (words, scale, Tap to sync).
+        self.sync_widget = Button:new{
             text = self:_syncText(),
-            face = Font:getFace("cfont", 16),
+            width = top_size * 3,
+            height = top_size,
+            text_font_size = 15,
+            text_font_bold = false,
+            bordersize = 0,
+            callback = function()
+                if self.on_sync_control then self.on_sync_control() end
+            end,
+            show_parent = self,
         }
         local function syncButton(text, delta)
             return Button:new{
@@ -2269,11 +2278,28 @@ function AudiobookPlayer:_isTapOnMiniButton(pos, widget)
 end
 
 function AudiobookPlayer:_syncText(offset_ms)
+    local p = self.plugin
     if not offset_ms then
-        local p = self.plugin
-        offset_ms = (p and p.getSetting and p:getSetting("smil_sync_offset_ms", 0)) or 0
+        offset_ms = (p and p.getSyncOffsetMs and p:getSyncOffsetMs())
+            or (p and p.getSetting and p:getSetting("smil_sync_offset_ms", 0)) or 0
+    end
+    -- In words ("0.8 s later"), not a signed number.
+    local ok, SyncUI = false, nil
+    if p and p._syncUI then ok, SyncUI = p:_syncUI() end
+    if ok and SyncUI then
+        return T(_("Sync: %1"), SyncUI.short(offset_ms))
     end
     return string.format("Sync %+.1f s", offset_ms / 1000)
+end
+
+--- The full player's sync label after a change made elsewhere.
+function AudiobookPlayer:refreshSyncLabel()
+    if self.sync_widget then
+        self.sync_widget:setText(self:_syncText(), self.sync_widget.width)
+        if self._sync_label_box and self._sync_label_box.dimen then
+            UIManager:setDirty(self, function() return "fast", self._sync_label_box.dimen end)
+        end
+    end
 end
 
 --- Shift the read-along highlight timing by delta_ms.  Minimized: the new
@@ -2284,7 +2310,7 @@ function AudiobookPlayer:_nudgeSync(delta_ms)
     local v = self.on_sync_nudge(delta_ms)
     if not v then return end
     if self.sync_widget then
-        self.sync_widget:setText(self:_syncText(v))
+        self.sync_widget:setText(self:_syncText(v), self.sync_widget.width)
     end
     if self._minimized then
         local ok, err = pcall(self._showSyncOverlay, self, v)
@@ -3201,6 +3227,7 @@ function AudiobookPlayer:handleEvent(event)
             if self.sync_minus_button then
                 table.insert(buttons, self.sync_minus_button)
                 table.insert(buttons, self.sync_plus_button)
+                if self.sync_widget then table.insert(buttons, self.sync_widget) end
             end
             if self.locate_button then
                 table.insert(buttons, 1, self.locate_button)
