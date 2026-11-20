@@ -3063,7 +3063,7 @@ function AudiobookPlayer:handleEvent(event)
         if not ges then return false end
 
         -- DEBUG: log every gesture we receive
-        logger.warn("ABP gesture:", ges.ges,
+        logger.dbg("ABP gesture:", ges.ges,
             "pos=", ges.pos and (tostring(ges.pos.x) .. "," .. tostring(ges.pos.y)) or "nil",
             "minimized=", self._minimized,
             "dragging=", self._scrubber_dragging)
@@ -3107,7 +3107,7 @@ function AudiobookPlayer:handleEvent(event)
                 local bar_h = self.progress_bar.dimen.h
                 local in_zone = ges.pos.y >= bar_y - self._scrubber_touch_height / 2
                     and ges.pos.y <= bar_y + bar_h + self._scrubber_touch_height / 2
-                logger.warn("ABP pan/hold_pan bar_y=", bar_y, "bar_h=", bar_h,
+                logger.dbg("ABP pan/hold_pan bar_y=", bar_y, "bar_h=", bar_h,
                     "touch_h=", self._scrubber_touch_height,
                     "in_zone=", in_zone, "dragging=", self._scrubber_dragging)
                 if in_zone then
@@ -3116,7 +3116,7 @@ function AudiobookPlayer:handleEvent(event)
                     return true
                 end
             else
-                logger.warn("ABP pan/hold_pan NO progress_bar.dimen")
+                logger.dbg("ABP pan/hold_pan NO progress_bar.dimen")
             end
         end
 

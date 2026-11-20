@@ -4743,7 +4743,7 @@ function Audiobook:_skipAudioToTurnedPage()
     if not page then return false end
     local cur = ms:_skipBase()
     local cur_page = ms:_entryPage(cur)
-    logger.warn("Audiobook: page turn: now on page", page, "; narrated line", cur,
+    logger.dbg("Audiobook: page turn: now on page", page, "; narrated line", cur,
         "is on page", cur_page)
     -- Forward turns only; a page we cannot place is left alone.
     if not cur_page or page <= cur_page then return false end
@@ -4829,18 +4829,21 @@ function Audiobook:_pauseOnBackTurn()
     -- Browsing away first, so the pause does not turn the view back to the
     -- line it paused on.
     self._readaloud_browsing_away = true
-    ms:pause()
-    pcall(function() ms:clearSentenceHighlight() end)
-    -- Off the narrated page now: the bar's Play opens into its choices.
-    self:_showReturnToReadAloudButton()
     self._play_from_page = true
+    ms:pause()
     logger.warn("Audiobook: turned back to page", page, "from", cur_page, "; paused")
-    local bar = ms.playback_bar
-    if bar and bar._showHint then
-        pcall(bar._showHint, bar, bar.on_return_choice
-            and _("Paused. Tap Play to choose where to continue.")
-            or _("Paused."))
-    end
+    -- The audio stops first; the screen work (highlight, bar choices) comes
+    -- on the next tick so it does not hold up the pause.
+    UIManager:nextTick(function()
+        pcall(function() ms:clearSentenceHighlight() end)
+        self:_showReturnToReadAloudButton()
+        local bar = ms.playback_bar
+        -- The large bar shows the choices itself; a toast would only be one
+        -- more e-ink refresh. The small bar still says what happened.
+        if bar and bar._showHint and not bar.on_return_choice_kind then
+            pcall(bar._showHint, bar, _("Paused. Tap Play to choose where to continue."))
+        end
+    end)
     return true
 end
 
@@ -4979,7 +4982,7 @@ function Audiobook:_handlePageTurnFollow()
         return
     end
     if self:getSetting("page_turn_skips_audio", false) then
-        logger.warn("Audiobook: page turn seen: state", self.media_sync.state,
+        logger.dbg("Audiobook: page turn seen: state", self.media_sync.state,
             "auto-follow count", self._media_sync_page_follow_count or 0,
             "busy", self._in_handle_page_turn_follow and true or false)
     end
