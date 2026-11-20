@@ -737,9 +737,17 @@ function BtUI._autoConnectAtStart(plugin)
     local bt = plugin.bt_manager
     local address = plugin:getSetting("bt_device_addr", nil)
     if not bt or not address then return false end
-    if plugin._bt_auto_connecting then return true end
-    plugin._bt_auto_connecting = true
     local name = plugin:getSetting("bt_device_name", nil)
+    if plugin._bt_auto_connecting then
+        -- Already connecting (e.g. started when the book opened): playback
+        -- starts by itself once the headset is up.
+        UIManager:show(InfoMessage:new{
+            text = name and T(_("Connecting to %1..."), name) or _("Connecting to the headset..."),
+            timeout = 3,
+        })
+        return true
+    end
+    plugin._bt_auto_connecting = true
     logger.warn("BtUI: headset not connected at play; connecting", address)
     local function wanted()
         local ms = plugin.media_sync
@@ -770,6 +778,53 @@ function BtUI._autoConnectAtStart(plugin)
             plugin._bt_auto_connecting = nil
             plugin._bt_silent_warned = nil
             BtUI._showBtSilentDialog(plugin, true)
+        end,
+    })
+    return true
+end
+
+--- A book with an audiobook was opened: start connecting the saved headset
+--- now, quietly (no dialog), so it is ready by the time Play is pressed.
+--- Turning Bluetooth on and paging AirPods takes 20-25 s on a Clara BW.
+--- Play during the connect joins it (_autoConnectAtStart sees it running).
+--- Gives up silently; Play then connects (or prompts) as before.
+-- @treturn bool true when a connect was started
+function BtUI.preconnectForBook(plugin, doc_path)
+    if not plugin:getSetting("bt_connect_on_open", true) then return false end
+    local bt = plugin.bt_manager
+    local address = plugin:getSetting("bt_device_addr", nil)
+    if not bt or not address then return false end
+    if plugin._bt_auto_connecting then return false end
+    local ok_c, up = pcall(bt.anyAudioDeviceConnected, bt)
+    if ok_c and up then return false end
+    plugin._bt_auto_connecting = true
+    logger.warn("BtUI: book with audio opened; connecting", address, "in the background")
+    local function book_open()
+        local doc = plugin.ui and plugin.ui.document
+        return doc ~= nil and (doc.file_path or doc.file) == doc_path
+    end
+    BtUI._connectLoop(plugin, address, {
+        power_on = true,
+        still_wanted = function()
+            -- Keep going while the book is open, or once Play took it over.
+            if book_open() or mediaPlaying(plugin) then return true end
+            plugin._bt_auto_connecting = nil
+            return false
+        end,
+        on_back = function(s)
+            plugin._bt_auto_connecting = nil
+            logger.warn("BtUI: headset ready", s, "s after the book opened")
+        end,
+        on_give_up = function()
+            plugin._bt_auto_connecting = nil
+            logger.warn("BtUI: headset not found after the book opened")
+            -- Play joined this connect and is waiting on it: same prompt
+            -- as a connect started by Play.
+            local ms = plugin.media_sync
+            if ms and ms.state ~= "stopped" then
+                plugin._bt_silent_warned = nil
+                BtUI._showBtSilentDialog(plugin, true)
+            end
         end,
     })
     return true
