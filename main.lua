@@ -1218,7 +1218,7 @@ function Audiobook:addToMainMenu(menu_items)
                         callback = function()
                             self:toggleSetting("keep_playing_on_lid_close", false)
                         end,
-                        help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake while something is playing and suspends on its own within 30 seconds once playback stops or pauses. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
+                        help_text = _("When enabled, closing the case/cover keeps audio playing: the device stays awake, the frontlight turns off and the touch screen is ignored until you open it (headset buttons still work). Paused from the headset, it stays awake up to 30 minutes so you can resume; once playback stops it suspends within about 30 seconds. When disabled (default), playback pauses on lid close and resumes when reopened. Disabling prevents device crashes caused by audio processes running during hardware suspend."),
                     },
                 },
             },
@@ -5724,6 +5724,9 @@ local LID_SUSPEND_CHECK_INTERVAL = 30
 -- A single non-playing observation can be a transient (track advance,
 -- sentence gap); the suspend only fires once it persists this long.
 local LID_CONFIRM_INTERVAL = 5
+-- Paused (not stopped) with the lid shut: how long to stay awake for the
+-- headset's play button before suspending anyway.
+local LID_PAUSED_AWAKE_S = 30 * 60
 
 --[[--
 Install custom SleepCoverClosed/Opened handlers.
@@ -5735,6 +5738,55 @@ the moment playback stops or pauses, so the device never lies awake
 with nothing audible.  When the setting is off (or audio isn't
 playing), the original KOReader handlers are called normally.
 --]]
+--- Lid closed with audio kept playing: frontlight off and the touch screen
+--- ignored (the case rubbing it must not turn pages or tap the bar). Keys
+--- still work, so headset buttons and the lid itself keep working.
+function Audiobook:_lidQuietOn()
+    if self._lid_quiet then return end
+    self._lid_quiet = {}
+    local ok_p, powerd = pcall(function() return Device:getPowerDevice() end)
+    if ok_p and powerd and powerd.isFrontlightOn then
+        local ok_on, on = pcall(powerd.isFrontlightOn, powerd)
+        if ok_on and on then
+            self._lid_quiet.light = true
+            pcall(powerd.turnOffFrontlight, powerd)
+        end
+    end
+    local input = Device.input
+    if input and input.handleTouchEv and input.voidEv then
+        self._lid_quiet.touch = input.handleTouchEv
+        input.handleTouchEv = input.voidEv
+        pcall(input.resetState, input)
+    end
+    logger.warn("Audiobook: lid closed while playing: light off, touch off",
+        self._lid_quiet.light and "(light was on)" or "")
+end
+
+--- Undo _lidQuietOn: touch back, frontlight back if it was on.
+function Audiobook:_lidQuietOff()
+    local q = self._lid_quiet
+    if not q then return end
+    self._lid_quiet = nil
+    local input = Device.input
+    if q.touch and input then
+        if input._abs_ev_handler == input.voidEv then
+            -- KOReader's own short input block is running and saved our
+            -- void handler: hand it the real one to restore instead.
+            input._abs_ev_handler = q.touch
+        else
+            input.handleTouchEv = q.touch
+        end
+        pcall(input.resetState, input)
+    end
+    if q.light then
+        local ok_p, powerd = pcall(function() return Device:getPowerDevice() end)
+        if ok_p and powerd and powerd.turnOnFrontlight then
+            pcall(powerd.turnOnFrontlight, powerd)
+        end
+    end
+    logger.warn("Audiobook: lid opened: touch on", q.light and ", light on" or "")
+end
+
 function Audiobook:_installSleepCoverOverride()
     if self._orig_sleep_cover_closed then return end  -- already installed
 
@@ -5765,6 +5817,19 @@ function Audiobook:_installSleepCoverOverride()
         if plugin.media_sync and plugin.media_sync:isPlaying() then
             still_playing = true
         end
+        -- Paused from the headset with the lid shut: stay awake so the
+        -- headset's play button can resume, but not forever.
+        local ms = plugin.media_sync
+        if not still_playing and ms and ms.state == ms.STATE.PAUSED then
+            local now = os.time()
+            plugin._lid_paused_since = plugin._lid_paused_since or now
+            if now - plugin._lid_paused_since < LID_PAUSED_AWAKE_S then
+                UIManager:scheduleIn(LID_SUSPEND_CHECK_INTERVAL, lidWatchdogTick)
+                return
+            end
+        else
+            plugin._lid_paused_since = nil
+        end
         if still_playing then
             plugin._lid_watchdog_blip = false
             UIManager:scheduleIn(LID_SUSPEND_CHECK_INTERVAL, lidWatchdogTick)
@@ -5778,6 +5843,9 @@ function Audiobook:_installSleepCoverOverride()
         plugin._lid_watchdog_blip = false
         plugin._prevented_lid_suspend = false
         logger.warn("Audiobook: lid closed but playback stopped, suspending device")
+        -- Hand KOReader's suspend the light and touch as they were, so its
+        -- own resume restores them.
+        pcall(plugin._lidQuietOff, plugin)
         if plugin._orig_sleep_cover_closed then
             plugin._orig_sleep_cover_closed()
         end
@@ -5814,6 +5882,7 @@ function Audiobook:_installSleepCoverOverride()
             plugin._lid_watchdog_blip = false
             UIManager:unschedule(lidWatchdogTick)
             UIManager:scheduleIn(LID_SUSPEND_CHECK_INTERVAL, lidWatchdogTick)
+            pcall(plugin._lidQuietOn, plugin)
             return
         end
         -- Setting off or not playing: use original KOReader behavior
@@ -5826,6 +5895,8 @@ function Audiobook:_installSleepCoverOverride()
         if Device.is_cover_closed ~= nil then
             Device.is_cover_closed = false
         end
+        pcall(plugin._lidQuietOff, plugin)
+        plugin._lid_paused_since = nil
         if plugin._prevented_lid_suspend then
             -- We blocked suspend on close, so there's nothing to resume from
             plugin._prevented_lid_suspend = false
@@ -5849,6 +5920,7 @@ Called on plugin teardown to leave KOReader in a clean state.
 --]]
 function Audiobook:_removeSleepCoverOverride()
     if not self._orig_sleep_cover_closed then return end
+    pcall(self._lidQuietOff, self)
 
     if self._lid_watchdog_tick then
         pcall(function() UIManager:unschedule(self._lid_watchdog_tick) end)
