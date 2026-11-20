@@ -2030,13 +2030,17 @@ function AudiobookPlayer:_buildLargeMiniBar()
             seg_w = math.max(seg_w, probe:getSize().w + 2 * seg_pad)
             probe:free()
         end
+        -- Keep the segments inside the rounded outline: painted at the
+        -- edge, their white fill cut into the corners' curve.
+        local box_radius = Screen:scaleBySize(10)
+        local box_pad = math.ceil(box_radius * 0.35)
         self._mini_choice_buttons = {}
         for _i, s in ipairs(specs) do
             local kind = s[2]
             table.insert(self._mini_choice_buttons, Button:new{
                 text = s[1],
                 width = seg_w,
-                height = play_h,
+                height = play_h - 2 * box_pad,
                 text_font_size = seg_font,
                 text_font_bold = true,
                 bordersize = 0,
@@ -2056,9 +2060,12 @@ function AudiobookPlayer:_buildLargeMiniBar()
         end
         choice_box = FrameContainer:new{
             bordersize = Size.border.thick,
-            radius = Screen:scaleBySize(10),
-            padding = 0,
+            radius = box_radius,
+            padding = box_pad,
+            padding_top = box_pad,
+            padding_bottom = box_pad,
             margin = 0,
+            background = self:_getThemeBackground(),
             HorizontalGroup:new(seg_items),
         }
         left_buttons = { choice_box }
