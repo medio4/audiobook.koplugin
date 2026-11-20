@@ -2858,7 +2858,63 @@ end
 -- sits where the bar is) and the sleep screen.
 local STAY_BELOW = { VirtualKeyboard = true, ScreenSaver = true, ScreenSaverLock = true }
 
+--- Screen height a menu may use so it ends above the floating bar, or nil
+--- when the bar is not floating over menus (or sits in the upper half,
+--- where the user dragged it out of the way).
+local function menuRoomAboveBar()
+    local bar = rawget(UIManager, "_audiobook_top_bar")
+    if not (bar and bar.visible and bar._minimized) or bar.suppressed then return nil end
+    local p = bar.plugin
+    if p and p.getSetting and not (p:getSetting("floating_enabled", true)
+            and p:getSetting("bar_over_menus", true)) then
+        return nil
+    end
+    local y
+    if bar._menu_y_pct then
+        y = math.floor(bar._menu_y_pct * bar.height + 0.5)
+    else
+        y = bar:_dockedBarY()
+    end
+    if not y or y < bar.height / 2 then return nil end
+    return y
+end
+
+--- While the bar floats over menus, make KOReader's menus fit above it:
+--- the top menu (TouchMenu) and full-height lists (Menu: table of
+--- contents, bookmarks, chapter lists...) get a shorter height, so fewer
+--- items go on each page and the rest move to the next page instead of
+--- hiding under the bar. Lists are usually centred, so they lose the
+--- bar's height at both ends.
+local function installMenuFit()
+    if UIManager._audiobook_menu_fit then return end
+    UIManager._audiobook_menu_fit = true
+    local ok_t, TouchMenu = pcall(require, "ui/widget/touchmenu")
+    if ok_t and TouchMenu and TouchMenu.init then
+        local orig = TouchMenu.init
+        TouchMenu.init = function(tm, ...)
+            local ok, y = pcall(menuRoomAboveBar)
+            if ok and y and (not tm.height or tm.height > y) then
+                tm.height = y
+            end
+            return orig(tm, ...)
+        end
+    end
+    local ok_m, Menu = pcall(require, "ui/widget/menu")
+    if ok_m and Menu and Menu.init then
+        local orig = Menu.init
+        Menu.init = function(m, ...)
+            local ok, y = pcall(menuRoomAboveBar)
+            local screen_h = Screen:getHeight()
+            if ok and y and (not m.height or m.height >= screen_h) then
+                m.height = math.max(math.floor(screen_h / 2), 2 * y - screen_h)
+            end
+            return orig(m, ...)
+        end
+    end
+end
+
 local function installTopHook()
+    installMenuFit()
     if UIManager._audiobook_top_hook then return end
     local orig_show = UIManager.show
     UIManager._audiobook_top_hook = true
