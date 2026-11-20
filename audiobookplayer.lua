@@ -553,19 +553,22 @@ function AudiobookPlayer:setupUI()
     -- Line-by-line view: sync adjusters, same job as the mini bar's − / +.
     local sync_row
     if self.lines_mode and self.on_sync_nudge and not is_landscape then
-        -- The label itself opens the sync control (words, scale, Tap to sync).
-        self.sync_widget = Button:new{
-            text = self:_syncText(),
-            width = top_size * 3,
-            height = top_size,
-            text_font_size = 15,
-            text_font_bold = false,
-            bordersize = 0,
-            callback = function()
-                if self.on_sync_control then self.on_sync_control() end
-            end,
-            show_parent = self,
-        }
+        -- The shift in words over a small scale; tapping it opens the sync
+        -- control. Plain text if the sync UI didn't load.
+        local SyncUI = self:_syncUI()
+        if SyncUI then
+            self.sync_widget = SyncUI.Label:new{
+                width = top_size * 3,
+                height = top_size,
+                font_size = 15,
+                offset_ms = self:_syncOffset(),
+            }
+        else
+            self.sync_widget = TextWidget:new{
+                text = self:_syncText(),
+                face = Font:getFace("cfont", 16),
+            }
+        end
         local function syncButton(text, delta)
             return Button:new{
                 text = text,
@@ -2315,29 +2318,61 @@ function AudiobookPlayer:_isTapOnMiniButton(pos, widget)
     return pos.x >= d.x - slop and pos.x <= d.x + d.w + slop
 end
 
-function AudiobookPlayer:_syncText(offset_ms)
+--- The sync UI module (words, scale, control), or nil.
+function AudiobookPlayer:_syncUI()
     local p = self.plugin
-    if not offset_ms then
-        offset_ms = (p and p.getSyncOffsetMs and p:getSyncOffsetMs())
-            or (p and p.getSetting and p:getSetting("smil_sync_offset_ms", 0)) or 0
-    end
-    -- In words ("0.8 s later"), not a signed number.
-    local ok, SyncUI = false, nil
-    if p and p._syncUI then ok, SyncUI = p:_syncUI() end
-    if ok and SyncUI then
-        return T(_("Sync: %1"), SyncUI.short(offset_ms))
-    end
+    if not (p and p._syncUI) then return nil end
+    local ok, SyncUI = p:_syncUI()
+    return ok and SyncUI or nil
+end
+
+function AudiobookPlayer:_syncOffset()
+    local SyncUI = self:_syncUI()
+    if SyncUI then return SyncUI.get(self.plugin) end
+    local p = self.plugin
+    return (p and p.getSetting and p:getSetting("smil_sync_offset_ms", 0)) or 0
+end
+
+--- Fallback text when the sync UI didn't load.
+function AudiobookPlayer:_syncText(offset_ms)
+    offset_ms = offset_ms or self:_syncOffset()
     return string.format("Sync %+.1f s", offset_ms / 1000)
 end
 
---- The full player's sync label after a change made elsewhere.
-function AudiobookPlayer:refreshSyncLabel()
-    if self.sync_widget then
-        self.sync_widget:setText(self:_syncText(), self.sync_widget.width)
-        if self._sync_label_box and self._sync_label_box.dimen then
-            UIManager:setDirty(self, function() return "fast", self._sync_label_box.dimen end)
-        end
+--- Put offset_ms (default: the current one) into the full player's label.
+function AudiobookPlayer:_setSyncLabel(offset_ms)
+    local w = self.sync_widget
+    if not w then return end
+    offset_ms = offset_ms or self:_syncOffset()
+    if w.setOffset then
+        w:setOffset(offset_ms)
+    else
+        w:setText(self:_syncText(offset_ms))
     end
+end
+
+--- Screen rect of the sync label: the label's own (it records where it was
+--- painted), else its box's.
+function AudiobookPlayer:_syncLabelRect()
+    local d = self.sync_widget and self.sync_widget.dimen
+    if d and d.x then return d end
+    return self._sync_label_box and self._sync_label_box.dimen
+end
+
+--- The full player's label after a change made in the sync control.
+function AudiobookPlayer:refreshSyncLabel()
+    if not self.sync_widget then return end
+    self:_setSyncLabel()
+    local rect = self:_syncLabelRect()
+    if rect and not self._minimized then
+        UIManager:setDirty(self, function() return "fast", rect end)
+    end
+end
+
+--- Open the sync control (words, scale, Earlier / Later, Reset).
+function AudiobookPlayer:_openSyncControl()
+    local SyncUI = self:_syncUI()
+    if SyncUI then SyncUI.showControl(self.plugin) end
 end
 
 --- Shift the read-along highlight timing by delta_ms.  Minimized: the new
@@ -2347,9 +2382,7 @@ function AudiobookPlayer:_nudgeSync(delta_ms)
     if not self.on_sync_nudge then return end
     local v = self.on_sync_nudge(delta_ms)
     if not v then return end
-    if self.sync_widget then
-        self.sync_widget:setText(self:_syncText(v), self.sync_widget.width)
-    end
+    self:_setSyncLabel(v)
     if self._minimized and self._mini_time then
         -- A small note in the bar's clock line, only while adjusting.
         local ok, err = pcall(self._showSyncNote, self, v)
@@ -2357,10 +2390,9 @@ function AudiobookPlayer:_nudgeSync(delta_ms)
     elseif self._minimized then
         local ok, err = pcall(self._showSyncOverlay, self, v)
         if not ok then logger.err("AudiobookPlayer: sync overlay failed:", err) end
-    elseif self._sync_label_box then
-        UIManager:setDirty(self, function()
-            return "fast", self._sync_label_box.dimen
-        end)
+    elseif self:_syncLabelRect() then
+        local rect = self:_syncLabelRect()
+        UIManager:setDirty(self, function() return "fast", rect end)
     end
 end
 
@@ -3276,6 +3308,12 @@ function AudiobookPlayer:handleEvent(event)
                 table.insert(buttons, self.sync_plus_button)
                 if self.sync_widget then table.insert(buttons, self.sync_widget) end
             end
+            -- The sync label (words + scale) opens the sync control.
+            if self.sync_widget and self.sync_widget.setOffset
+                    and self:_isTapOnWidget(ges.pos, self.sync_widget) then
+                self:_openSyncControl()
+                return true
+            end
             if self.locate_button then
                 table.insert(buttons, 1, self.locate_button)
             end
@@ -3725,17 +3763,42 @@ end
 local SYNC_OVERLAY_SECONDS = 2.5
 
 function AudiobookPlayer:_showSyncOverlay(offset_ms)
-    local text = string.format("Sync %+.1f s", offset_ms / 1000)
+    local SyncUI = self:_syncUI()
+    local text = SyncUI and SyncUI.words(offset_ms)
+        or string.format("Sync %+.1f s", offset_ms / 1000)
     if self._sync_overlay then
         self._sync_overlay_text:setText(text)
+        if self._sync_overlay_scale then self._sync_overlay_scale:setOffset(offset_ms) end
         UIManager:setDirty(self._sync_overlay, function()
             return "fast", self._sync_overlay_rect
         end)
     else
         local face = Font:getFace("cfont", 22)
-        self._sync_overlay_text = TextWidget:new{ text = text, face = face }
-        -- Fixed width from the widest label so updates repaint in place.
-        local w = TextWidget:new{ text = "Sync +00.0 s", face = face }:getSize().w
+        local pad_x = Size.padding.large * 2
+        -- Fixed width from the widest label so updates repaint in place,
+        -- never wider than the screen.
+        local max_w = self.width - 2 * (pad_x + Size.border.thick) - Screen:scaleBySize(16)
+        local w = SyncUI and SyncUI.wordsWidth(face)
+            or TextWidget:new{ text = "Sync +00.0 s", face = face }:getSize().w
+        w = math.min(w, max_w)
+        self._sync_overlay_text = TextWidget:new{ text = text, face = face, max_width = w }
+        local inner = CenterContainer:new{
+            dimen = Geom:new{ w = w, h = self._sync_overlay_text:getSize().h },
+            self._sync_overlay_text,
+        }
+        if SyncUI then
+            self._sync_overlay_scale = SyncUI.Scale:new{
+                width = w,
+                height = Screen:scaleBySize(12),
+                offset_ms = offset_ms,
+            }
+            inner = VerticalGroup:new{
+                align = "center",
+                inner,
+                VerticalSpan:new{ width = Size.padding.default },
+                self._sync_overlay_scale,
+            }
+        end
         local frame = FrameContainer:new{
             toast = true,
             _plugin_chrome = true,
@@ -3743,12 +3806,9 @@ function AudiobookPlayer:_showSyncOverlay(offset_ms)
             bordersize = Size.border.thick,
             radius = Screen:scaleBySize(10),
             padding = Size.padding.large,
-            padding_left = Size.padding.large * 2,
-            padding_right = Size.padding.large * 2,
-            CenterContainer:new{
-                dimen = Geom:new{ w = w, h = self._sync_overlay_text:getSize().h },
-                self._sync_overlay_text,
-            },
+            padding_left = pad_x,
+            padding_right = pad_x,
+            inner,
         }
         local size = frame:getSize()
         local x = math.floor((self.width - size.w) / 2)
@@ -3843,6 +3903,7 @@ function AudiobookPlayer:_closeSyncOverlay()
         UIManager:close(self._sync_overlay, "ui", self._sync_overlay_rect)
         self._sync_overlay = nil
         self._sync_overlay_text = nil
+        self._sync_overlay_scale = nil
     end
 end
 

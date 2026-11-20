@@ -580,9 +580,7 @@ function Audiobook:onReaderFooterVisibilityChange()
     end)
 end
 
--- ── Read-along sync offset (per book) ────────────────────────────────
-
---- The sync UI module, loaded once.
+--- The sync UI module (words, scale, control), loaded once.
 function Audiobook:_syncUI()
     if not self._syncui_mod then
         local ok, mod = pcall(dofile, PLUGIN_PATH .. "syncui.lua")
@@ -630,10 +628,8 @@ function Audiobook:showSyncControl()
         logger.warn("Audiobook: sync control failed to load:", SyncUI)
         return
     end
-    SyncUI.showControl(self, function()
-        local bar = self.media_sync and self.media_sync.playback_bar
-        if bar and bar.refreshSyncLabel then pcall(bar.refreshSyncLabel, bar) end
-    end)
+    -- The control repaints the player's label itself (SyncUI.refreshPlayer).
+    SyncUI.showControl(self)
 end
 
 --- Tap to sync: tap the word being heard, the offset is set from it.
@@ -943,21 +939,19 @@ function Audiobook:addToMainMenu(menu_items)
                         end,
                         enabled_func = function() return (self.ui and self.ui.document) or false end,
                         keep_menu_open = true,
-                        callback = function()
-                            self:showSyncControl()
+                        callback = function(touchmenu_instance)
+                            local ok, SyncUI = self:_syncUI()
+                            if not (ok and SyncUI) then
+                                logger.warn("Audiobook: sync control failed to load:", SyncUI)
+                                return
+                            end
+                            SyncUI.showControl(self, {
+                                on_change = function()
+                                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                                end,
+                            })
                         end,
-                        help_text = _("Moves the read-along highlight later or earlier than the narration, for this book. Opens a control with the current shift in words and on a scale, earlier/later buttons, and Tap to sync: tap the word you hear and the shift is worked out for you. The full-screen player's sync label opens the same control."),
-                    },
-                    {
-                        text = _("Tap to sync"),
-                        enabled_func = function()
-                            local ms = self.media_sync
-                            return (ms and ms.timing_data and ms.state ~= ms.STATE.STOPPED) and true or false
-                        end,
-                        callback = function()
-                            self:startTapToSync()
-                        end,
-                        help_text = _("While the audiobook plays, tap the word you hear. The highlight timing is set from that tap, for the offset above."),
+                        help_text = _("Moves the read-along highlight later or earlier than the narration. Opens a control that shows the current shift in words and on a scale, with Earlier and Later buttons. Some audiobooks (e.g. with publisher intros) have timing tables offset from the embedded audio. In the full-screen player, tap the sync label to open the same control."),
                     },
                 },
             },
